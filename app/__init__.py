@@ -20,8 +20,14 @@ def create_app(config_class=Config):
 
     # Register blueprints
     from app.routes.auth import auth_bp
+    from app.routes.import_data import import_data_bp
+    from app.routes.customer import customer_bp
+    from app.routes.forecast import forecast_bp
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
+    app.register_blueprint(import_data_bp, url_prefix="/api/import")
+    app.register_blueprint(customer_bp, url_prefix="/api/customer")
+    app.register_blueprint(forecast_bp, url_prefix="/api")
 
     # Create database tables if they don't exist
     with app.app_context():
