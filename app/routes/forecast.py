@@ -34,9 +34,9 @@ def sales_forecast():
         # Query data transaksi berdasarkan filter
         query = db.session.query(
             Transaction.invoice_date.label("ds"), Transaction.qty.label("y")
-        ).filter(
-            Transaction.category == "BAHAN BAKU MINILAB CHEMICAL"
-        )  # Filter kategori
+        )  # .filter(
+        #     Transaction.category == "BAHAN BAKU MINILAB CHEMICAL"
+        # )  # Filter kategori
 
         if product_id:
             query = query.filter(Transaction.product_code == product_id)
