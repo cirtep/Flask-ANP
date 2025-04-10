@@ -65,7 +65,7 @@ class Transaction(db.Model):
             "agent_name": self.agent_name,
             "product_id": self.product_id,
             "product_name": self.product_name,
-            "qty": self.quantity,
+            "qty": self.qty,
             "unit": self.unit,
             "total_amount": self.total_amount,
             "order_sequence": self.order_sequence,
