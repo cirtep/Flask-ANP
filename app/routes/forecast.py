@@ -324,9 +324,9 @@ def sales_forecast():
         for item in forecast_data:
             item['ds'] = item['ds'].strftime('%Y-%m-%d')
             # Round values to integers since we're forecasting quantities
-            item['yhat'] = round(float(item['yhat']), 2)
+            item['yhat'] = max(0,round(float(item['yhat']), 2))
             item['yhat_lower'] = max(0, round(float(item['yhat_lower']), 2))  # Ensure non-negative
-            item['yhat_upper'] = round(float(item['yhat_upper']), 2)
+            item['yhat_upper'] = max(0,round(float(item['yhat_upper']), 2))
         
         return success_response(
             data=forecast_data,
@@ -365,7 +365,7 @@ def save_forecast():
         
         for forecast_item in forecast_data:
             # Skip historical items
-            if forecast_item.get('is_historical', False):
+            if forecast_item.get('type') != 'forecast':
                 continue
                 
             forecast_date = forecast_item.get('ds')
@@ -383,9 +383,9 @@ def save_forecast():
             ).first()
             
             forecast_values = {
-                'yhat': forecast_item.get('yhat'),
-                'yhat_lower': forecast_item.get('yhat_lower'),
-                'yhat_upper': forecast_item.get('yhat_upper')
+                'yhat': forecast_item.get('forecast'),
+                'yhat_lower': forecast_item.get('lower'),
+                'yhat_upper': forecast_item.get('upper')
             }
             
             if existing_forecast:
@@ -433,7 +433,7 @@ def get_saved_forecasts(product_id):
         # Get the forecasts
         saved_forecasts = SavedForecast.query.filter_by(product_id=product_id).order_by(SavedForecast.forecast_date).all()
         
-        # Format the response
+        # Format the response - ensure we return a proper array
         forecast_data = []
         for forecast in saved_forecasts:
             data = forecast.get_forecast_data()
@@ -448,7 +448,7 @@ def get_saved_forecasts(product_id):
             })
         
         return success_response(
-            data=forecast_data,
+            data=forecast_data,  # This is now guaranteed to be an array
             message="Saved forecasts retrieved successfully"
         )
             
