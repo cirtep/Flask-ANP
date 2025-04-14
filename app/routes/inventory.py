@@ -511,6 +511,8 @@ def get_product_history():
         return error_response(f"Error retrieving product history: {str(e)}", 500)
 
 
+# Update this section in your app/routes/inventory.py file's get_product_analysis endpoint
+
 @inventory_bp.route("/product_analysis", methods=["GET"])
 @jwt_required()
 def get_product_analysis():
@@ -542,25 +544,74 @@ def get_product_analysis():
         
         # Last 30 days
         thirty_days_ago = now - timedelta(days=30)
-        sales_30_days = db.session.query(func.sum(Transaction.qty)).filter(
+        sales_30_days_query = db.session.query(
+            func.sum(Transaction.qty).label('quantity'),
+            func.sum(Transaction.total_amount).label('revenue'),
+            func.sum(Transaction.total_cost).label('cost')
+        ).filter(
             Transaction.product_id == product_id,
             Transaction.invoice_date >= thirty_days_ago
-        ).scalar() or 0
+        ).first()
         
-        # Last 90 days
+        sales_30_days = int(sales_30_days_query.quantity or 0)
+        revenue_30_days = float(sales_30_days_query.revenue or 0)
+        cost_30_days = float(sales_30_days_query.cost or 0)
+        
+        # Last 90 days (3 months)
         ninety_days_ago = now - timedelta(days=90)
-        sales_90_days = db.session.query(func.sum(Transaction.qty)).filter(
+        sales_90_days_query = db.session.query(
+            func.sum(Transaction.qty).label('quantity'),
+            func.sum(Transaction.total_amount).label('revenue'),
+            func.sum(Transaction.total_cost).label('cost')
+        ).filter(
             Transaction.product_id == product_id,
             Transaction.invoice_date >= ninety_days_ago
-        ).scalar() or 0
+        ).first()
+        
+        sales_90_days = int(sales_90_days_query.quantity or 0)
+        revenue_90_days = float(sales_90_days_query.revenue or 0)
+        cost_90_days = float(sales_90_days_query.cost or 0)
+        
+        # Last 6 months (180 days)
+        six_months_ago = now - timedelta(days=180)
+        sales_6_months_query = db.session.query(
+            func.sum(Transaction.qty).label('quantity'),
+            func.sum(Transaction.total_amount).label('revenue'),
+            func.sum(Transaction.total_cost).label('cost')
+        ).filter(
+            Transaction.product_id == product_id,
+            Transaction.invoice_date >= six_months_ago
+        ).first()
+        
+        sales_6_months = int(sales_6_months_query.quantity or 0)
+        revenue_6_months = float(sales_6_months_query.revenue or 0)
+        cost_6_months = float(sales_6_months_query.cost or 0)
         
         # Last 12 months
         twelve_months_ago = now - timedelta(days=365)
-        sales_12_months = db.session.query(func.sum(Transaction.qty)).filter(
+        sales_12_months_query = db.session.query(
+            func.sum(Transaction.qty).label('quantity'),
+            func.sum(Transaction.total_amount).label('revenue'),
+            func.sum(Transaction.total_cost).label('cost')
+        ).filter(
             Transaction.product_id == product_id,
             Transaction.invoice_date >= twelve_months_ago
-        ).scalar() or 0
+        ).first()
         
+        sales_12_months = int(sales_12_months_query.quantity or 0)
+        revenue_12_months = float(sales_12_months_query.revenue or 0)
+        cost_12_months = float(sales_12_months_query.cost or 0)
+        
+        # Calculate total revenue and profit
+        total_revenue = revenue_12_months
+        total_cost = cost_12_months
+        gross_profit = total_revenue - total_cost
+        
+        # Calculate profit margin percentage
+        profit_margin = 0
+        if total_revenue > 0:
+            profit_margin = (gross_profit / total_revenue) * 100
+            
         # Previous 12 months (for trend comparison)
         twenty_four_months_ago = now - timedelta(days=730)
         prev_12_months_sales = db.session.query(func.sum(Transaction.qty)).filter(
@@ -570,12 +621,16 @@ def get_product_analysis():
         ).scalar() or 0
         
         # Calculate sales trend percentage
+        sales_trend = 0
         if prev_12_months_sales > 0:
             sales_trend = ((sales_12_months - prev_12_months_sales) / prev_12_months_sales) * 100
-        else:
-            sales_trend = 0
         
-        # Monthly sales for calculating demand rates
+        # Calculate monthly demand rate
+        monthly_demand_rate = sales_12_months / 12
+        weekly_demand_rate = monthly_demand_rate / 4.33  # Average weeks per month
+        daily_demand_rate = monthly_demand_rate / 30.44  # Average days per month
+        
+        # Calculate seasonal variability
         monthly_sales = db.session.query(
             func.date_format(Transaction.invoice_date, '%Y-%m-01').label('month'),
             func.sum(Transaction.qty).label('quantity')
@@ -584,29 +639,15 @@ def get_product_analysis():
             Transaction.invoice_date >= twelve_months_ago
         ).group_by('month').all()
         
-        # Calculate monthly demand rate
+        seasonal_variability = 0
         months_with_sales = len(monthly_sales)
-        if months_with_sales > 0:
-            total_sales = sum(float(entry.quantity) for entry in monthly_sales)
-            monthly_demand_rate = total_sales / months_with_sales
-            weekly_demand_rate = monthly_demand_rate / 4.33  # Average weeks per month
-            daily_demand_rate = monthly_demand_rate / 30.44  # Average days per month
-        else:
-            monthly_demand_rate = 0
-            weekly_demand_rate = 0
-            daily_demand_rate = 0
         
-        # Calculate seasonal variability
         if months_with_sales > 1:
             quantities = [float(entry.quantity) for entry in monthly_sales]
             avg = sum(quantities) / len(quantities)
             if avg > 0:
                 stddev = (sum((q - avg) ** 2 for q in quantities) / len(quantities)) ** 0.5
                 seasonal_variability = (stddev / avg) * 100
-            else:
-                seasonal_variability = 0
-        else:
-            seasonal_variability = 0
         
         # Calculate stock coverage (in days) based on daily demand rate
         current_stock = float(stock.qty) if stock else 0
@@ -629,22 +670,27 @@ def get_product_analysis():
         
         last_restocked_date = last_restocked[0].strftime("%Y-%m-%d") if last_restocked else None
         
-        # Compile the analysis
+        # Compile the analysis data
         analysis = {
             "last_restocked": last_restocked_date,
             "supplier_name": product.supplier_name,
             "min_stock": float(product.min_stock) if product.min_stock else 0,
             "max_stock": float(product.max_stock) if product.max_stock else 0,
             "standard_price": float(product.standard_price),
-            "sales_30_days": float(sales_30_days),
-            "sales_90_days": float(sales_90_days),
-            "sales_12_months": float(sales_12_months),
-            "sales_trend": float(sales_trend),
-            "avg_monthly_sales": float(monthly_demand_rate),
-            "monthly_demand_rate": float(monthly_demand_rate),
-            "weekly_demand_rate": float(weekly_demand_rate),
-            "daily_demand_rate": float(daily_demand_rate),
-            "seasonal_variability": float(seasonal_variability),
+            "sales_30_days": sales_30_days,
+            "sales_90_days": sales_90_days,
+            "sales_6_months": sales_6_months,
+            "sales_12_months": sales_12_months,
+            "total_revenue": total_revenue,
+            "total_cost": total_cost,
+            "gross_profit": gross_profit,
+            "profit_margin": profit_margin,
+            "sales_trend": sales_trend,
+            "avg_monthly_sales": monthly_demand_rate,
+            "monthly_demand_rate": monthly_demand_rate,
+            "weekly_demand_rate": weekly_demand_rate,
+            "daily_demand_rate": daily_demand_rate,
+            "seasonal_variability": seasonal_variability,
             "stock_coverage": stock_coverage,
             "reorder_alert": reorder_alert
         }
@@ -657,3 +703,5 @@ def get_product_analysis():
     except Exception as e:
         current_app.logger.error(f"Error retrieving product analysis: {str(e)}")
         return error_response(f"Error retrieving product analysis: {str(e)}", 500)
+    
+    

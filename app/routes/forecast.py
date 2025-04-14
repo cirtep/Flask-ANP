@@ -5,8 +5,8 @@ from flask_jwt_extended import get_jwt_identity, jwt_required
 import pandas as pd
 import numpy as np
 from prophet import Prophet
+from sqlalchemy import func
 from app import db
-from app.models.product_stock import ProductStock
 from app.models.transaction import Transaction
 from app.models.product import Product
 from app.models.forecast_parameter import ForecastParameter, TuningJob
@@ -197,11 +197,151 @@ def get_tuning_job(job_id):
         current_app.logger.error(f"Error retrieving tuning job: {str(e)}")
         return error_response(f"Error retrieving tuning job: {str(e)}", 500)
     
+@forecast_bp.route("/sales_forecast", methods=["GET"])
+@jwt_required()
+def sales_forecast():
+    """Generate sales forecast for a specific product"""
+    try:
+        # Get query parameters
+        product_id = request.args.get('product_id')
+        periods = int(request.args.get('periods', 6))  # Default to 6 months
+        
+        # Validate periods - only allow 3 or 6 months
+        if periods not in [3, 6]:
+            return error_response("Periods must be either 3 or 6 months", 400)
+        
+        if not product_id:
+            return error_response("Product ID is required", 400)
+            
+        # Check if product exists and get its category
+        product = Product.query.filter_by(product_id=product_id).first()
+        if not product:
+            return error_response(f"Product with ID {product_id} not found", 404)
+        
+        category = product.category
+        
+        # Get historical sales data for the product
+        query = db.session.query(
+            Transaction.invoice_date.label("ds"), 
+            func.sum(Transaction.qty).label("y")
+        ).filter(
+            Transaction.product_id == product_id
+        ).group_by(
+            Transaction.invoice_date
+        ).order_by(
+            Transaction.invoice_date
+        )
+        
+        transactions = query.all()
+        
+        if not transactions:
+            return error_response("No historical sales data available for this product", 404)
+            
+        # Convert to DataFrame
+        df = pd.DataFrame(transactions, columns=["ds", "y"])
+        df["ds"] = pd.to_datetime(df["ds"])
+        df["y"] = df["y"].astype(float)
+        
+        # Prepare monthly data with proper frequency
+        freq = "MS"  # Monthly start frequency
+        df_monthly = df.groupby(pd.Grouper(key='ds', freq=freq))['y'].sum().reset_index()
+        
+        # Ensure the date range is complete with all months
+        all_dates = pd.date_range(start=df_monthly['ds'].min(), end=df_monthly['ds'].max(), freq=freq)
+        df_complete = pd.DataFrame({'ds': all_dates})
+        df_monthly = pd.merge(df_complete, df_monthly, on='ds', how='left').fillna(0)
+        
+        # Add month dummies as additional regressors for better monthly seasonality handling
+        df_monthly['month'] = df_monthly['ds'].dt.month
+        for m_val in range(1, 13):
+            df_monthly[f'is_{m_val:02d}'] = (df_monthly['month'] == m_val).astype(int)
+        df_monthly = df_monthly.drop(columns=['month'])
+        
+        # Check if we have saved parameters for this category
+        params = None
+        if category:
+            params = ForecastParameter.query.filter_by(category=category).first()
+        
+        # Set up Prophet model
+        if params:
+            # Use saved parameters
+            prophet_params = params.get_parameters()
+            model = Prophet(**prophet_params)
+            current_app.logger.info(f"Using custom parameters for category '{category}': {prophet_params}")
+        else:
+            # Use default parameters
+            model = Prophet(
+                yearly_seasonality=True,
+                weekly_seasonality=False,
+                daily_seasonality=False,
+                seasonality_mode='multiplicative',
+                changepoint_prior_scale=0.05,
+                seasonality_prior_scale=10.0
+            )
+            current_app.logger.info(f"Using default parameters for product '{product_id}'")
+            
+        # Add Indonesia country holidays
+        model.add_country_holidays(country_name='ID')
+        
+        # Add monthly dummy regressors
+        for m_val in range(1, 13):
+            model.add_regressor(f'is_{m_val:02d}')
+        
+        # Fit the model
+        model.fit(df_monthly)
+        
+        # Create future dataframe for forecasting
+        future = model.make_future_dataframe(periods=periods, freq='MS')
+        
+        # Add month dummies to future dataframe
+        future['month'] = future['ds'].dt.month
+        for m_val in range(1, 13):
+            future[f'is_{m_val:02d}'] = (future['month'] == m_val).astype(int)
+        future = future.drop(columns=['month'])
+        
+        # Generate forecast
+        forecast = model.predict(future)
+        
+        # Format the forecast results
+        # Include 2 months of historical data for continuity in the chart
+        last_historical_date = df_monthly['ds'].max()
+        
+        # Get the 2 most recent historical months
+        historical_data = forecast[forecast['ds'] <= last_historical_date].tail(2)[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].copy()
+        historical_data['is_historical'] = True
+        
+        # Get future forecast periods
+        future_data = forecast[forecast['ds'] > last_historical_date][['ds', 'yhat', 'yhat_lower', 'yhat_upper']].copy()
+        future_data['is_historical'] = False
+        
+        # Combine historical and forecast data
+        forecast_data = pd.concat([historical_data, future_data]).to_dict('records')
+        
+        # Ensure we only return the historical plus requested number of periods
+        forecast_data = forecast_data[:periods + 2]
+        
+        # Convert dates to string format
+        for item in forecast_data:
+            item['ds'] = item['ds'].strftime('%Y-%m-%d')
+            # Round values to integers since we're forecasting quantities
+            item['yhat'] = round(float(item['yhat']), 2)
+            item['yhat_lower'] = max(0, round(float(item['yhat_lower']), 2))  # Ensure non-negative
+            item['yhat_upper'] = round(float(item['yhat_upper']), 2)
+        
+        return success_response(
+            data=forecast_data,
+            message="Forecast generated successfully"
+        )
+            
+    except Exception as e:
+        current_app.logger.error(f"Error generating forecast: {str(e)}")
+        return error_response(f"Error generating forecast: {str(e)}", 500)
 
+    
 @forecast_bp.route("/save", methods=["POST"])
 @jwt_required()
 def save_forecast():
-    """Endpoint to save a forecast for future reference"""
+    """Endpoint to save forecasts as individual monthly records"""
     try:
         data = request.get_json()
         if not data:
@@ -209,7 +349,7 @@ def save_forecast():
         
         product_id = data.get("product_id")
         forecast_data = data.get("forecast_data")
-        periods = data.get("periods", 6)
+        current_user = get_jwt_identity()
         
         if not product_id or not forecast_data:
             return error_response("Missing required fields: product_id, forecast_data", 400)
@@ -219,31 +359,99 @@ def save_forecast():
         if not product:
             return error_response(f"Product with ID {product_id} not found", 404)
         
+        # Process each forecast month individually
+        saved_count = 0
+        updated_count = 0
         
-        existing_forecast = SavedForecast.query.filter_by(product_id=product_id).first()
-        
-        if existing_forecast:
-            # Update existing forecast
-            existing_forecast.forecast_data = json.dumps(forecast_data)
-            existing_forecast.periods = periods
-            existing_forecast.updated_at = datetime.now(timezone.utc)
-        else:
-            # Create new forecast
-            new_forecast = SavedForecast(
+        for forecast_item in forecast_data:
+            # Skip historical items
+            if forecast_item.get('is_historical', False):
+                continue
+                
+            forecast_date = forecast_item.get('ds')
+            if not forecast_date:
+                continue
+                
+            # Convert to datetime if it's a string
+            if isinstance(forecast_date, str):
+                forecast_date = datetime.strptime(forecast_date, '%Y-%m-%d').date()
+            
+            # Check if forecast for this month already exists
+            existing_forecast = SavedForecast.query.filter_by(
                 product_id=product_id,
-                forecast_data=json.dumps(forecast_data),
-                periods=periods,
-                created_by=get_jwt_identity()
-            )
-            db.session.add(new_forecast)
+                forecast_date=forecast_date
+            ).first()
+            
+            forecast_values = {
+                'yhat': forecast_item.get('yhat'),
+                'yhat_lower': forecast_item.get('yhat_lower'),
+                'yhat_upper': forecast_item.get('yhat_upper')
+            }
+            
+            if existing_forecast:
+                # Update existing forecast
+                existing_forecast.set_forecast_data(forecast_values)
+                existing_forecast.updated_at = datetime.now(timezone.utc)
+                updated_count += 1
+            else:
+                # Create new forecast
+                new_forecast = SavedForecast(
+                    product_id=product_id,
+                    forecast_date=forecast_date,
+                    forecast_data=json.dumps(forecast_values),
+                    created_by=current_user
+                )
+                db.session.add(new_forecast)
+                saved_count += 1
         
         db.session.commit()
         
         return success_response(
-            message="Forecast saved successfully"
+            data={
+                'saved': saved_count,
+                'updated': updated_count
+            },
+            message=f"Forecast saved successfully: {saved_count} new entries, {updated_count} updates"
         )
             
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(f"Error saving forecast: {str(e)}")
         return error_response(f"Error saving forecast: {str(e)}", 500)
+
+
+@forecast_bp.route("/saved/<product_id>", methods=["GET"])
+@jwt_required()
+def get_saved_forecasts(product_id):
+    """Endpoint to retrieve all saved forecasts for a product"""
+    try:
+        # Check if the product exists
+        product = Product.query.filter_by(product_id=product_id).first()
+        if not product:
+            return error_response(f"Product with ID {product_id} not found", 404)
+        
+        # Get the forecasts
+        saved_forecasts = SavedForecast.query.filter_by(product_id=product_id).order_by(SavedForecast.forecast_date).all()
+        
+        # Format the response
+        forecast_data = []
+        for forecast in saved_forecasts:
+            data = forecast.get_forecast_data()
+            forecast_data.append({
+                'ds': forecast.forecast_date.strftime('%Y-%m-%d'),
+                'yhat': data.get('yhat'),
+                'yhat_lower': data.get('yhat_lower'),
+                'yhat_upper': data.get('yhat_upper'),
+                'saved_at': forecast.created_at.strftime('%Y-%m-%d %H:%M:%S'),
+                'updated_at': forecast.updated_at.strftime('%Y-%m-%d %H:%M:%S') if forecast.updated_at else None,
+                'saved_by': forecast.created_by
+            })
+        
+        return success_response(
+            data=forecast_data,
+            message="Saved forecasts retrieved successfully"
+        )
+            
+    except Exception as e:
+        current_app.logger.error(f"Error retrieving saved forecasts: {str(e)}")
+        return error_response(f"Error retrieving saved forecasts: {str(e)}", 500)
