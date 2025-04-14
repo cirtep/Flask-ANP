@@ -383,6 +383,7 @@ def create_product():
 @inventory_bp.route("/delete/<product_id>", methods=["DELETE"])
 @jwt_required()
 def delete_product(product_id):
+
     """
     Endpoint to delete a product.
     """
@@ -411,3 +412,248 @@ def delete_product(product_id):
         db.session.rollback()
         current_app.logger.error(f"Product deletion error: {str(e)}")
         return error_response(f"Error deleting product: {str(e)}", 500)
+    
+
+@inventory_bp.route("/search", methods=["GET"])
+@jwt_required()
+def search_products():
+    """Search for products by name or code"""
+    try:
+        query = request.args.get("q", "")
+        if not query or len(query) < 2:
+            return success_response(data=[], message="Query too short")
+        
+        # Search in product name and code
+        products = db.session.query(Product, ProductStock).join(
+            ProductStock, 
+            Product.product_id == ProductStock.product_id
+        ).filter(
+            or_(
+                Product.product_name.ilike(f"%{query}%"),
+                Product.product_code.ilike(f"%{query}%"),
+                Product.product_id.ilike(f"%{query}%")
+            )
+        ).limit(10).all()
+        
+        # Format results
+        results = []
+        for product, stock in products:
+            results.append({
+                "product_id": product.product_id,
+                "product_code": product.product_code,
+                "product_name": product.product_name,
+                "category": product.category,
+                "standard_price": float(product.standard_price),
+                "qty": float(stock.qty),
+                "unit": stock.unit,
+                "min_stock": float(product.min_stock) if product.min_stock else 0,
+                "max_stock": float(product.max_stock) if product.max_stock else 0,
+            })
+        
+        return success_response(
+            data=results,
+            message="Products found"
+        )
+        
+    except Exception as e:
+        current_app.logger.error(f"Error searching products: {str(e)}")
+        return error_response(f"Error searching products: {str(e)}", 500)
+
+
+@inventory_bp.route("/product_history", methods=["GET"])
+@jwt_required()
+def get_product_history():
+    """Get historical sales data for a product"""
+    try:
+        product_id = request.args.get("product_id")
+        months = int(request.args.get("months", 24))  # Default to 24 months
+        
+        if not product_id:
+            return error_response("product_id is required", 400)
+        
+        # Get product info
+        product = Product.query.filter_by(product_id=product_id).first()
+        if not product:
+            return error_response(f"Product with ID {product_id} not found", 404)
+        
+        # Get sales history (aggregate by month)
+        from sqlalchemy import func, desc
+        from datetime import datetime, timedelta
+        
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=30 * months)
+        
+        # Query monthly sales
+        sales_history = db.session.query(
+            func.date_format(Transaction.invoice_date, '%Y-%m-01').label('date'),
+            func.sum(Transaction.qty).label('quantity')
+        ).filter(
+            Transaction.product_id == product_id,
+            Transaction.invoice_date >= start_date,
+            Transaction.invoice_date <= end_date
+        ).group_by('date').order_by('date').all()
+        
+        # Format results
+        results = []
+        for entry in sales_history:
+            results.append({
+                "date": entry.date,
+                "quantity": float(entry.quantity)
+            })
+        
+        return success_response(
+            data=results,
+            message="Product history retrieved successfully"
+        )
+        
+    except Exception as e:
+        current_app.logger.error(f"Error retrieving product history: {str(e)}")
+        return error_response(f"Error retrieving product history: {str(e)}", 500)
+
+
+@inventory_bp.route("/product_analysis", methods=["GET"])
+@jwt_required()
+def get_product_analysis():
+    """Get detailed analysis for a product"""
+    try:
+        product_id = request.args.get("product_id")
+        
+        if not product_id:
+            return error_response("product_id is required", 400)
+        
+        # Get product and stock info
+        product_data = db.session.query(Product, ProductStock).join(
+            ProductStock, 
+            Product.product_id == ProductStock.product_id
+        ).filter(
+            Product.product_id == product_id
+        ).first()
+        
+        if not product_data:
+            return error_response(f"Product with ID {product_id} not found", 404)
+        
+        product, stock = product_data
+        
+        # Get sales history for different time periods
+        from sqlalchemy import func
+        from datetime import datetime, timedelta
+        
+        now = datetime.now()
+        
+        # Last 30 days
+        thirty_days_ago = now - timedelta(days=30)
+        sales_30_days = db.session.query(func.sum(Transaction.qty)).filter(
+            Transaction.product_id == product_id,
+            Transaction.invoice_date >= thirty_days_ago
+        ).scalar() or 0
+        
+        # Last 90 days
+        ninety_days_ago = now - timedelta(days=90)
+        sales_90_days = db.session.query(func.sum(Transaction.qty)).filter(
+            Transaction.product_id == product_id,
+            Transaction.invoice_date >= ninety_days_ago
+        ).scalar() or 0
+        
+        # Last 12 months
+        twelve_months_ago = now - timedelta(days=365)
+        sales_12_months = db.session.query(func.sum(Transaction.qty)).filter(
+            Transaction.product_id == product_id,
+            Transaction.invoice_date >= twelve_months_ago
+        ).scalar() or 0
+        
+        # Previous 12 months (for trend comparison)
+        twenty_four_months_ago = now - timedelta(days=730)
+        prev_12_months_sales = db.session.query(func.sum(Transaction.qty)).filter(
+            Transaction.product_id == product_id,
+            Transaction.invoice_date >= twenty_four_months_ago,
+            Transaction.invoice_date < twelve_months_ago
+        ).scalar() or 0
+        
+        # Calculate sales trend percentage
+        if prev_12_months_sales > 0:
+            sales_trend = ((sales_12_months - prev_12_months_sales) / prev_12_months_sales) * 100
+        else:
+            sales_trend = 0
+        
+        # Monthly sales for calculating demand rates
+        monthly_sales = db.session.query(
+            func.date_format(Transaction.invoice_date, '%Y-%m-01').label('month'),
+            func.sum(Transaction.qty).label('quantity')
+        ).filter(
+            Transaction.product_id == product_id,
+            Transaction.invoice_date >= twelve_months_ago
+        ).group_by('month').all()
+        
+        # Calculate monthly demand rate
+        months_with_sales = len(monthly_sales)
+        if months_with_sales > 0:
+            total_sales = sum(float(entry.quantity) for entry in monthly_sales)
+            monthly_demand_rate = total_sales / months_with_sales
+            weekly_demand_rate = monthly_demand_rate / 4.33  # Average weeks per month
+            daily_demand_rate = monthly_demand_rate / 30.44  # Average days per month
+        else:
+            monthly_demand_rate = 0
+            weekly_demand_rate = 0
+            daily_demand_rate = 0
+        
+        # Calculate seasonal variability
+        if months_with_sales > 1:
+            quantities = [float(entry.quantity) for entry in monthly_sales]
+            avg = sum(quantities) / len(quantities)
+            if avg > 0:
+                stddev = (sum((q - avg) ** 2 for q in quantities) / len(quantities)) ** 0.5
+                seasonal_variability = (stddev / avg) * 100
+            else:
+                seasonal_variability = 0
+        else:
+            seasonal_variability = 0
+        
+        # Calculate stock coverage (in days) based on daily demand rate
+        current_stock = float(stock.qty) if stock else 0
+        stock_coverage = 0
+        if daily_demand_rate > 0:
+            stock_coverage = int(current_stock / daily_demand_rate)
+        
+        # Determine if reorder is needed
+        min_stock = float(product.min_stock) if product.min_stock else 0
+        reorder_alert = current_stock <= min_stock
+        
+        # Last restocked date (if available)
+        last_restocked = db.session.query(
+            ProductStock.report_date
+        ).filter(
+            ProductStock.product_id == product_id
+        ).order_by(
+            ProductStock.report_date.desc()
+        ).first()
+        
+        last_restocked_date = last_restocked[0].strftime("%Y-%m-%d") if last_restocked else None
+        
+        # Compile the analysis
+        analysis = {
+            "last_restocked": last_restocked_date,
+            "supplier_name": product.supplier_name,
+            "min_stock": float(product.min_stock) if product.min_stock else 0,
+            "max_stock": float(product.max_stock) if product.max_stock else 0,
+            "standard_price": float(product.standard_price),
+            "sales_30_days": float(sales_30_days),
+            "sales_90_days": float(sales_90_days),
+            "sales_12_months": float(sales_12_months),
+            "sales_trend": float(sales_trend),
+            "avg_monthly_sales": float(monthly_demand_rate),
+            "monthly_demand_rate": float(monthly_demand_rate),
+            "weekly_demand_rate": float(weekly_demand_rate),
+            "daily_demand_rate": float(daily_demand_rate),
+            "seasonal_variability": float(seasonal_variability),
+            "stock_coverage": stock_coverage,
+            "reorder_alert": reorder_alert
+        }
+        
+        return success_response(
+            data=analysis,
+            message="Product analysis retrieved successfully"
+        )
+        
+    except Exception as e:
+        current_app.logger.error(f"Error retrieving product analysis: {str(e)}")
+        return error_response(f"Error retrieving product analysis: {str(e)}", 500)

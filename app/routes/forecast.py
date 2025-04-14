@@ -1,15 +1,18 @@
+import json
 from flask import Blueprint, current_app, request
 # from flask.config import T
-from flask_jwt_extended import jwt_required
+from flask_jwt_extended import get_jwt_identity, jwt_required
 import pandas as pd
 import numpy as np
 from prophet import Prophet
 from app import db
+from app.models.product_stock import ProductStock
 from app.models.transaction import Transaction
 from app.models.product import Product
 from app.models.forecast_parameter import ForecastParameter, TuningJob
 from app.utils.security import success_response, error_response
 from datetime import datetime, timezone
+from app.models.saved_forecast import SavedForecast
 
 forecast_bp = Blueprint("forecast", __name__)
 
@@ -194,7 +197,7 @@ def get_tuning_job(job_id):
         current_app.logger.error(f"Error retrieving tuning job: {str(e)}")
         return error_response(f"Error retrieving tuning job: {str(e)}", 500)
     
-    
+
 @forecast_bp.route("/sales_forecast", methods=["GET"])
 @jwt_required()
 def sales_forecast():
@@ -339,3 +342,54 @@ def sales_forecast():
     except Exception as e:
         current_app.logger.error(f"Error in forecasting: {str(e)}")
         return error_response(f"Error in forecasting: {str(e)}", 500)
+    
+
+@forecast_bp.route("/save", methods=["POST"])
+@jwt_required()
+def save_forecast():
+    """Endpoint to save a forecast for future reference"""
+    try:
+        data = request.get_json()
+        if not data:
+            return error_response("No data provided", 400)
+        
+        product_id = data.get("product_id")
+        forecast_data = data.get("forecast_data")
+        periods = data.get("periods", 6)
+        
+        if not product_id or not forecast_data:
+            return error_response("Missing required fields: product_id, forecast_data", 400)
+        
+        # Check if the product exists
+        product = Product.query.filter_by(product_id=product_id).first()
+        if not product:
+            return error_response(f"Product with ID {product_id} not found", 404)
+        
+        
+        existing_forecast = SavedForecast.query.filter_by(product_id=product_id).first()
+        
+        if existing_forecast:
+            # Update existing forecast
+            existing_forecast.forecast_data = json.dumps(forecast_data)
+            existing_forecast.periods = periods
+            existing_forecast.updated_at = datetime.now(timezone.utc)
+        else:
+            # Create new forecast
+            new_forecast = SavedForecast(
+                product_id=product_id,
+                forecast_data=json.dumps(forecast_data),
+                periods=periods,
+                created_by=get_jwt_identity()
+            )
+            db.session.add(new_forecast)
+        
+        db.session.commit()
+        
+        return success_response(
+            message="Forecast saved successfully"
+        )
+            
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Error saving forecast: {str(e)}")
+        return error_response(f"Error saving forecast: {str(e)}", 500)
