@@ -5,14 +5,17 @@ from flask_jwt_extended import get_jwt_identity, jwt_required
 import pandas as pd
 import numpy as np
 from prophet import Prophet
-from sqlalchemy import func
+from sqlalchemy import and_, extract, func
 from app import db
 from app.models.transaction import Transaction
 from app.models.product import Product
 from app.models.forecast_parameter import ForecastParameter, TuningJob
 from app.utils.security import success_response, error_response
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from dateutil.relativedelta import relativedelta
+import calendar
 from app.models.saved_forecast import SavedForecast
+from app.models.product_stock import ProductStock
 
 forecast_bp = Blueprint("forecast", __name__)
 
@@ -455,3 +458,266 @@ def get_saved_forecasts(product_id):
     except Exception as e:
         current_app.logger.error(f"Error retrieving saved forecasts: {str(e)}")
         return error_response(f"Error retrieving saved forecasts: {str(e)}", 500)
+    
+@forecast_bp.route("/goals", methods=["GET"])
+@jwt_required()
+def get_goals_data():
+    """
+    Endpoint to retrieve data comparing saved forecasts (targets) with actual sales
+    for a specified month. If no month is specified, the current month is used.
+    """
+    try:
+        # Get query parameters
+        month_str = request.args.get('month')
+        
+        # Parse the month or use current month if not provided
+        if month_str:
+            try:
+                year, month = map(int, month_str.split('-'))
+                start_date = datetime(year, month, 1).date()
+            except (ValueError, TypeError):
+                return error_response("Invalid month format. Use YYYY-MM", 400)
+        else:
+            # Default to current month
+            today = datetime.now()
+            start_date = datetime(today.year, today.month, 1).date()
+            
+        # Calculate end date (last day of the month)
+        _, last_day = calendar.monthrange(start_date.year, start_date.month)
+        end_date = datetime(start_date.year, start_date.month, last_day).date()
+        
+        # Format month string for filtering saved forecasts
+        month_str = start_date.strftime("%Y-%m")
+        day_one_str = f"{month_str}-01"
+        
+        # Step 1: Get all products with saved forecasts for this month
+        saved_forecasts_query = db.session.query(
+            SavedForecast.product_id,
+            Product.product_name,
+            ProductStock.unit,  # Get unit from ProductStock, not Product
+            Product.standard_price,
+            SavedForecast.forecast_data
+        ).join(
+            Product, SavedForecast.product_id == Product.product_id
+        ).join(
+            ProductStock, ProductStock.product_id == Product.product_id,  # Join with ProductStock
+            isouter=True  # Use left outer join in case some products don't have stock entries
+        ).filter(
+            func.date_format(SavedForecast.forecast_date, '%Y-%m') == month_str
+        ).all()
+        
+        # If no saved forecasts found for this month, return empty result
+        if not saved_forecasts_query:
+            return success_response(
+                data={
+                    "month": month_str,
+                    "month_name": start_date.strftime("%B %Y"),
+                    "products": [],
+                    "summary": {
+                        "total_forecasted": 0,
+                        "total_actual": 0,
+                        "total_forecasted_revenue": 0,
+                        "total_actual_revenue": 0,
+                        "achievement_rate": 0,
+                        "top_performers": [],
+                        "under_performers": []
+                    }
+                },
+                message="No saved forecasts found for this month"
+            )
+        
+        # Process saved forecasts
+        products_with_forecasts = []
+        
+        for product_id, product_name, unit, price, forecast_data in saved_forecasts_query:
+            # Parse the forecast data
+            forecast_values = json.loads(forecast_data)
+            forecast_quantity = round(float(forecast_values.get('yhat', 0)))
+            forecast_lower = round(float(forecast_values.get('yhat_lower', 0)))
+            forecast_upper = round(float(forecast_values.get('yhat_upper', 0)))
+            
+            products_with_forecasts.append({
+                "product_id": product_id,
+                "product_name": product_name,
+                "unit": unit or "Units",  # Default to "Units" if unit is None
+                "price": float(price) if price is not None else 0,
+                "forecast": forecast_quantity,
+                "forecast_lower": forecast_lower,
+                "forecast_upper": forecast_upper
+            })
+        
+        # Step 2: Get actual sales for these products in the specified month
+        product_ids = [p["product_id"] for p in products_with_forecasts]
+        
+        actual_sales_query = db.session.query(
+            Transaction.product_id,
+            func.sum(Transaction.qty).label('actual_qty'),
+            func.sum(Transaction.total_amount).label('actual_amount')
+        ).filter(
+            Transaction.product_id.in_(product_ids),
+            Transaction.invoice_date.between(start_date, end_date)
+        ).group_by(
+            Transaction.product_id
+        ).all()
+        
+        # Create a lookup dictionary for actual sales
+        actual_sales = {
+            product_id: {
+                'qty': int(qty) if qty is not None else 0,
+                'amount': float(amount) if amount is not None else 0
+            }
+            for product_id, qty, amount in actual_sales_query
+        }
+        
+        # Step 3: Combine forecast and actual data, calculate metrics
+        products_comparison = []
+        total_forecasted = 0
+        total_actual = 0
+        total_forecasted_revenue = 0
+        total_actual_revenue = 0
+        
+        for product in products_with_forecasts:
+            product_id = product["product_id"]
+            forecast_qty = product["forecast"]
+            price = product["price"]
+            
+            # Get actual sales from lookup, default to 0 if not found
+            actual_qty = actual_sales.get(product_id, {}).get('qty', 0)
+            actual_amount = actual_sales.get(product_id, {}).get('amount', 0)
+            
+            # Calculate forecast revenue (forecast quantity * price)
+            forecast_revenue = forecast_qty * price
+            
+            # Calculate variance and achievement rate
+            variance = actual_qty - forecast_qty
+            achievement_rate = (actual_qty / forecast_qty * 100) if forecast_qty > 0 else 0
+            
+            # Determine performance status
+            if achievement_rate >= 100:
+                status = "exceeded"
+            elif achievement_rate >= 95:
+                status = "achieved"
+            elif achievement_rate >= 80:
+                status = "near"
+            else:
+                status = "below"
+            
+            # Add to totals
+            total_forecasted += forecast_qty
+            total_actual += actual_qty
+            total_forecasted_revenue += forecast_revenue
+            total_actual_revenue += actual_amount
+            
+            # Build product comparison data
+            products_comparison.append({
+                "product_id": product_id,
+                "product_name": product["product_name"],
+                "unit": product["unit"],
+                "price": price,
+                "forecast": forecast_qty,
+                "forecast_lower": product["forecast_lower"],
+                "forecast_upper": product["forecast_upper"],
+                "actual": actual_qty,
+                "variance": variance,
+                "achievement_rate": achievement_rate,
+                "status": status,
+                "forecast_revenue": forecast_revenue,
+                "actual_revenue": actual_amount,
+                "revenue_variance": actual_amount - forecast_revenue
+            })
+        
+        # Calculate overall achievement rate
+        overall_achievement = (total_actual / total_forecasted * 100) if total_forecasted > 0 else 0
+        
+        # Sort products by achievement rate for top/under performers
+        sorted_by_achievement = sorted(products_comparison, key=lambda x: x["achievement_rate"], reverse=True)
+        
+        # Get top performers (products with achievement >= 90%)
+        top_performers = [p for p in sorted_by_achievement if p["achievement_rate"] >= 90][:3]
+        
+        # Get underperformers (products with achievement < 80%)
+        under_performers = [p for p in sorted_by_achievement if p["achievement_rate"] < 80]
+        under_performers = sorted(under_performers, key=lambda x: x["achievement_rate"])[:3]  # Sort by lowest achievement first
+        
+        # Step 4: Get historical data for trend analysis (last 6 months)
+        historical_data = {}
+        
+        for product in products_with_forecasts:
+            product_id = product["product_id"]
+            # Get 6 months of historical data including current month
+            historical_start = start_date - relativedelta(months=5)
+            
+            monthly_sales_query = db.session.query(
+                func.date_format(Transaction.invoice_date, '%Y-%m').label('month'),
+                func.sum(Transaction.qty).label('qty')
+            ).filter(
+                Transaction.product_id == product_id,
+                Transaction.invoice_date >= historical_start,
+                Transaction.invoice_date <= end_date
+            ).group_by('month').order_by('month').all()
+            
+            # Convert query results to dict by month
+            product_monthly_sales = {
+                month: int(qty) if qty is not None else 0
+                for month, qty in monthly_sales_query
+            }
+            
+            # Get historical forecasts for this product if available
+            historical_forecasts_query = db.session.query(
+                func.date_format(SavedForecast.forecast_date, '%Y-%m').label('month'),
+                SavedForecast.forecast_data
+            ).filter(
+                SavedForecast.product_id == product_id,
+                SavedForecast.forecast_date >= historical_start,
+                SavedForecast.forecast_date <= end_date
+            ).all()
+            
+            # Convert forecast query results to dict by month
+            product_monthly_forecasts = {}
+            for month, forecast_data in historical_forecasts_query:
+                forecast_values = json.loads(forecast_data)
+                product_monthly_forecasts[month] = round(float(forecast_values.get('yhat', 0)))
+            
+            # Build month-by-month trend data
+            trend_data = []
+            current_date = historical_start
+            while current_date <= start_date:
+                month_str = current_date.strftime("%Y-%m")
+                month_name = current_date.strftime("%b %Y")
+                
+                trend_data.append({
+                    "month": month_str,
+                    "month_name": month_name,
+                    "forecast": product_monthly_forecasts.get(month_str, None),
+                    "actual": product_monthly_sales.get(month_str, 0)
+                })
+                
+                current_date = current_date + relativedelta(months=1)
+            
+            historical_data[product_id] = trend_data
+        
+        # Prepare the response data
+        response_data = {
+            "month": month_str,
+            "month_name": start_date.strftime("%B %Y"),
+            "products": products_comparison,
+            "historical_data": historical_data,
+            "summary": {
+                "total_forecasted": total_forecasted,
+                "total_actual": total_actual,
+                "total_forecasted_revenue": total_forecasted_revenue,
+                "total_actual_revenue": total_actual_revenue,
+                "achievement_rate": overall_achievement,
+                "top_performers": top_performers,
+                "under_performers": under_performers
+            }
+        }
+        
+        return success_response(
+            data=response_data,
+            message="Goals data retrieved successfully"
+        )
+        
+    except Exception as e:
+        current_app.logger.error(f"Error retrieving goals data: {str(e)}")
+        return error_response(f"Error retrieving goals data: {str(e)}", 500)  
