@@ -5,10 +5,12 @@ from app.models.transaction import Transaction
 from app.models.product import Product
 from app.models.product_stock import ProductStock
 from app.models.customer import Customer
+from app.models.saved_forecast import SavedForecast
 from app.utils.security import success_response, error_response
-from sqlalchemy import func, desc, and_, extract
+from sqlalchemy import func, desc, and_, extract, distinct
 from datetime import datetime, timedelta
 import calendar
+import json
 
 dashboard_bp = Blueprint("dashboard", __name__)
 
@@ -89,6 +91,33 @@ def dashboard_summary():
                 "amount": float(amount)
             })
             
+        # ===== Sales Target =====
+        
+        # Get target from saved forecasts for current month
+        current_month_str = current_month_start.strftime("%Y-%m")
+        
+        # Retrieve all saved forecasts for current month to calculate sales target
+        saved_forecasts_query = db.session.query(
+            SavedForecast.product_id,
+            Product.standard_price,
+            SavedForecast.forecast_data
+        ).join(
+            Product, SavedForecast.product_id == Product.product_id
+        ).filter(
+            func.date_format(SavedForecast.forecast_date, '%Y-%m') == current_month_str
+        ).all()
+        
+        # Calculate total target amount by summing product of forecast qty * price
+        target_amount = 0
+        for product_id, price, forecast_data in saved_forecasts_query:
+            if price and forecast_data:
+                try:
+                    forecast_values = json.loads(forecast_data)
+                    forecast_qty = forecast_values.get('yhat', 0)
+                    target_amount += float(price) * float(forecast_qty)
+                except:
+                    continue
+            
         # ===== Inventory Metrics =====
         
         # Get inventory stats
@@ -126,6 +155,13 @@ def dashboard_summary():
         
         # Total customers
         total_customers = Customer.query.count()
+        
+        # Active customers (who made transactions this month)
+        active_customers_count = db.session.query(
+            func.count(distinct(Transaction.customer_id))
+        ).filter(
+            Transaction.invoice_date >= current_month_start
+        ).scalar() or 0
         
         # New customers this month
         new_customers_count = db.session.query(func.count(Customer.id)).filter(
@@ -199,6 +235,7 @@ def dashboard_summary():
                 "projected_month_end": projected_month_sales,
                 "current_month_orders": current_month_orders,
                 "last_month_orders": last_month_orders,
+                "target": target_amount,  # Add sales target
                 "trend": sales_trend
             },
             "inventory": {
@@ -209,6 +246,7 @@ def dashboard_summary():
             },
             "customers": {
                 "total_customers": total_customers,
+                "active_customers": active_customers_count,  # Add active customers
                 "new_customers": new_customers_count
             },
             "top_products": top_products,
