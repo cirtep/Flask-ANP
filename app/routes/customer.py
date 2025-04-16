@@ -1,13 +1,14 @@
-from flask import Blueprint, request, jsonify, make_response
+from flask import Blueprint, request, make_response
 from flask_jwt_extended import jwt_required
+import pandas as pd
 from app.models.customer import Customer
 from app.models.transaction import Transaction
 from app import db
 from app.utils.security import success_response, error_response
-from sqlalchemy import or_, func, desc, and_
+from sqlalchemy import or_, func, desc
 from datetime import datetime, timedelta
-import csv
-import io
+import tempfile
+import os
 
 customer_bp = Blueprint("customer", __name__)
 
@@ -267,78 +268,6 @@ def get_cities():
         return error_response(str(e), 500)
 
 
-@customer_bp.route("/export", methods=["GET"])
-@jwt_required()
-def export_customers():
-    """
-    Endpoint to export all customers to CSV
-    """
-    try:
-        # Get filter parameters
-        city_filter = request.args.get("city", "")
-        
-        # Base query
-        customer_query = Customer.query
-        
-        # Apply city filter if provided
-        if city_filter:
-            customer_query = customer_query.filter(Customer.city == city_filter)
-            
-        # Order by business_name
-        customers = customer_query.order_by(Customer.business_name).all()
-        
-        # Get purchase data
-        customer_ids = [c.customer_id for c in customers]
-        
-        # If we have customers, get their purchase totals
-        purchase_data = {}
-        if customer_ids:
-            purchase_query = db.session.query(
-                Transaction.customer_id,
-                func.sum(Transaction.total_amount).label('total_purchases')
-            ).filter(
-                Transaction.customer_id.in_(customer_ids)
-            ).group_by(
-                Transaction.customer_id
-            ).all()
-            
-            purchase_data = {cid: float(total) for cid, total in purchase_query}
-        
-        # Create CSV file in memory
-        output = io.StringIO()
-        writer = csv.writer(output)
-        
-        # Write header row
-        writer.writerow([
-            'Customer ID', 'Business Name', 'Owner Name', 'City', 'Phone',
-            'Address', 'NPWP', 'NIK', 'Price Type', 'Total Purchases'
-        ])
-        
-        # Write data rows
-        for customer in customers:
-            writer.writerow([
-                customer.customer_id,
-                customer.business_name,
-                customer.owner_name,
-                customer.city,
-                customer.phone if hasattr(customer, 'phone') else '',
-                customer.address_1,
-                customer.npwp,
-                customer.nik,
-                customer.price_type,
-                f"{purchase_data.get(customer.customer_id, 0):,.2f}"
-            ])
-        
-        # Create response
-        response = make_response(output.getvalue())
-        response.headers["Content-Disposition"] = f"attachment; filename=customers_export_{datetime.now().strftime('%Y%m%d')}.csv"
-        response.headers["Content-type"] = "text/csv"
-        
-        return response
-    except Exception as e:
-        return error_response(str(e), 500)
-
-
 @customer_bp.route("/create", methods=["POST"])
 @jwt_required()
 def create_customer():
@@ -441,12 +370,22 @@ def update_customer(customer_id):
 @jwt_required()
 def delete_customer(customer_id):
     """
-    Endpoint for deleting a customer
+    Endpoint for deleting a customer.
+    Customers with transactions cannot be deleted.
     """
     try:
         customer = Customer.query.filter_by(customer_id=customer_id).first()
         if not customer:
             return error_response("Customer not found", 404)
+        
+        # Check if customer has transactions
+        transaction_count = Transaction.query.filter_by(customer_id=customer_id).count()
+        if transaction_count > 0:
+            return error_response(
+                "Cannot delete customer with existing transactions. Customer has "
+                f"{transaction_count} transactions.", 
+                400
+            )
         
         db.session.delete(customer)
         db.session.commit()
@@ -455,3 +394,84 @@ def delete_customer(customer_id):
     except Exception as e:
         db.session.rollback()
         return error_response(str(e), 500)
+
+@customer_bp.route("/export", methods=["GET"])
+@jwt_required()
+def export_customers():
+    """Endpoint to export all customers to Excel format"""
+    try:
+        # Get filter parameters
+        city_filter = request.args.get("city", "")
+        
+        # Base query
+        customer_query = Customer.query
+        
+        # Apply city filter if provided
+        if city_filter:
+            customer_query = customer_query.filter(Customer.city == city_filter)
+            
+        # Order by business_name
+        customers = customer_query.order_by(Customer.business_name).all()
+        
+        # Get purchase data
+        customer_ids = [c.customer_id for c in customers]
+        
+        # If we have customers, get their purchase totals
+        purchase_data = {}
+        if customer_ids:
+            purchase_query = db.session.query(
+                Transaction.customer_id,
+                func.sum(Transaction.total_amount).label('total_purchases')
+            ).filter(
+                Transaction.customer_id.in_(customer_ids)
+            ).group_by(
+                Transaction.customer_id
+            ).all()
+            
+            purchase_data = {cid: float(total) for cid, total in purchase_query}
+        
+        # Prepare data for export
+        export_data = []
+        for customer in customers:
+            export_data.append({
+                'Customer ID': customer.customer_id,
+                'Business Name': customer.business_name,
+                'Owner Name': customer.owner_name or '',
+                'City': customer.city or '',
+                'Phone': customer.extra or '',
+                'Address': customer.address_1 or '',
+                'NPWP': customer.npwp or '',
+                'NIK': customer.nik or '',
+                'Price Type': customer.price_type or 'Standard',
+                'Total Purchases': purchase_data.get(customer.customer_id, 0)
+            })
+        
+        # Convert to dataframe
+        df = pd.DataFrame(export_data)
+        
+        # Format the date for the filename
+        today = datetime.now().strftime('%Y%m%d')
+        
+        # Export as Excel file
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp:
+            # Write to Excel
+            df.to_excel(temp.name, index=False, engine='openpyxl')
+            temp_name = temp.name
+        
+        # Read the file
+        with open(temp_name, 'rb') as f:
+            data = f.read()
+        
+        # Clean up
+        os.unlink(temp_name)
+        
+        # Create response
+        response = make_response(data)
+        response.headers["Content-Disposition"] = f"attachment; filename=customers_export_{today}.xlsx"
+        response.headers["Content-type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        
+        return response
+        
+    except Exception as e:
+        return error_response(f"Error exporting customers: {str(e)}", 500)
+    
