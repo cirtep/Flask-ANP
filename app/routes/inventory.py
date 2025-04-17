@@ -1,5 +1,8 @@
-from flask import Blueprint, request, jsonify, current_app
+import os
+import tempfile
+from flask import Blueprint, make_response, request, jsonify, current_app
 from flask_jwt_extended import jwt_required
+import pandas as pd
 from app import db
 from app.utils.security import success_response, error_response
 from sqlalchemy import or_, func
@@ -17,9 +20,11 @@ inventory_bp = Blueprint("inventory", __name__)
 def get_inventory():
     """
     Endpoint to retrieve comprehensive inventory data with stock information.
+    Data is sorted by total sales amount.
     """
     try:
         # Use SQLAlchemy ORM for more reliable data conversion
+        # First get product and stock data
         query = db.session.query(Product, ProductStock).join(
             ProductStock, Product.product_id == ProductStock.product_id
         )
@@ -27,9 +32,31 @@ def get_inventory():
         # Execute the query
         results = query.all()
 
-        # Manual conversion to ensure proper dictionary format
+        # Create a dictionary to hold total sales per product
+        product_sales = {}
+        
+        # Query total sales amount for each product
+        sales_data = db.session.query(
+            Transaction.product_id,
+            func.sum(Transaction.total_amount).label('total_sales'),
+            func.sum(Transaction.qty).label('total_qty')
+        ).group_by(
+            Transaction.product_id
+        ).all()
+        
+        # Convert to dictionary for easy lookup
+        for product_id, total_sales, total_qty in sales_data:
+            product_sales[product_id] = {
+                'total_amount': float(total_sales) if total_sales else 0,
+                'total_qty': int(total_qty) if total_qty else 0
+            }
+
+        # Manual conversion to ensure proper dictionary format and include sales data
         inventory_list = []
         for product, stock in results:
+            # Get sales data for this product
+            sales = product_sales.get(product.product_id, {'total_amount': 0, 'total_qty': 0})
+            
             item = {
                 # From Product model
                 "id": product.id,
@@ -38,21 +65,25 @@ def get_inventory():
                 "product_name": product.product_name,
                 "standard_price": float(product.standard_price),  # Ensure numeric
                 "retail_price": float(product.retail_price),
-                "ppn": float(product.ppn),
+                "ppn": float(product.ppn) if product.ppn else 0,
                 "category": product.category,
-                "min_stock": float(product.min_stock),
-                "max_stock": float(product.max_stock),
+                "min_stock": float(product.min_stock) if product.min_stock else 0,
+                "max_stock": float(product.max_stock) if product.max_stock else 0,
                 "supplier_id": product.supplier_id,
                 "supplier_name": product.supplier_name,
                 # From ProductStock model
-                "report_date": product.created_at.isoformat()
-                if product.created_at
-                else None,
+                "report_date": stock.report_date.isoformat() if stock.report_date else None,
                 "location": stock.location,
                 "qty": float(stock.qty),
                 "unit": stock.unit,
+                # Sales data (not displayed in table but used for sorting)
+                "total_amount": sales['total_amount'],
+                "total_qty_sold": sales['total_qty']
             }
             inventory_list.append(item)
+        
+        # Sort by total_amount (highest sales first)
+        inventory_list.sort(key=lambda x: x["total_amount"], reverse=True)
 
         # Calculate metrics
         metrics = {
@@ -267,7 +298,7 @@ def get_product_sales(product_id):
 @jwt_required()
 def update_product(product_id):
     """
-    Endpoint to update product information.
+    Endpoint to update product information and stock.
     """
     try:
         # Get the product
@@ -285,22 +316,71 @@ def update_product(product_id):
         if not data:
             return error_response("No data provided", 400)
             
+        # Validate required fields
+        if 'product_name' not in data or not data['product_name'].strip():
+            return error_response("Product name is required", 400)
+            
+        if 'standard_price' not in data or data['standard_price'] is None:
+            return error_response("Standard price is required", 400)
+            
+        if 'qty' not in data or data['qty'] is None:
+            return error_response("Quantity is required", 400)
+            
         # Update product fields
-        for field in ["product_name", "standard_price", "retail_price", 
-                      "category", "min_stock", "max_stock", 
-                      "supplier_id", "supplier_name"]:
-            if field in data:
-                setattr(product, field, data[field])
+        product.product_name = data['product_name']
+        product.standard_price = data['standard_price']
+        
+        # Update optional product fields
+        if 'retail_price' in data and data['retail_price'] is not None:
+            product.retail_price = data['retail_price']
+        if 'category' in data:
+            product.category = data['category']
+        if 'min_stock' in data and data['min_stock'] is not None:
+            product.min_stock = data['min_stock']
+        if 'max_stock' in data and data['max_stock'] is not None:
+            product.max_stock = data['max_stock']
+        if 'supplier_id' in data:
+            product.supplier_id = data['supplier_id']
+        if 'supplier_name' in data:
+            product.supplier_name = data['supplier_name']
                 
         # Update stock fields
-        for field in ["location", "qty", "unit"]:
-            if field in data:
-                setattr(stock, field, data[field])
+        if 'qty' in data and data['qty'] is not None:
+            stock.qty = data['qty']
+        if 'unit' in data:
+            stock.unit = data['unit']
+        if 'location' in data:
+            stock.location = data['location']
+        if 'price' in data and data['price'] is not None:
+            stock.price = data['price']
+        elif 'standard_price' in data:
+            # If price isn't provided but standard_price is, update price to match
+            stock.price = data['standard_price']
+            
+        # Update the report date to current date for tracking purposes
+        stock.report_date = datetime.now().date()
                 
         # Save changes
         db.session.commit()
         
+        # Return updated product data
+        updated_product = {
+            "product_id": product.product_id,
+            "product_code": product.product_code,
+            "product_name": product.product_name,
+            "standard_price": float(product.standard_price),
+            "retail_price": float(product.retail_price),
+            "category": product.category,
+            "min_stock": float(product.min_stock) if product.min_stock else 0,
+            "max_stock": float(product.max_stock) if product.max_stock else 0,
+            "supplier_name": product.supplier_name,
+            "qty": float(stock.qty),
+            "unit": stock.unit,
+            "location": stock.location
+        }
+        
         return success_response(
+            data=updated_product,
             message="Product updated successfully"
         )
         
@@ -309,83 +389,12 @@ def update_product(product_id):
         current_app.logger.error(f"Product update error: {str(e)}")
         return error_response(f"Error updating product: {str(e)}", 500)
 
-
-@inventory_bp.route("/create", methods=["POST"])
-@jwt_required()
-def create_product():
-    """
-    Endpoint to create a new product.
-    """
-    try:
-        # Get request data
-        data = request.get_json()
-        if not data:
-            return error_response("No data provided", 400)
-            
-        # Check required fields
-        required_fields = ["product_code", "product_id", "product_name", 
-                          "standard_price", "qty", "unit"]
-        for field in required_fields:
-            if field not in data:
-                return error_response(f"Missing required field: {field}", 400)
-                
-        # Check if product already exists
-        existing = Product.query.filter(
-            or_(
-                Product.product_code == data["product_code"],
-                Product.product_id == data["product_id"]
-            )
-        ).first()
-        
-        if existing:
-            return error_response("Product with this code or ID already exists", 400)
-            
-        # Create product
-        product = Product(
-            product_code=data["product_code"],
-            product_id=data["product_id"],
-            product_name=data["product_name"],
-            standard_price=data["standard_price"],
-            retail_price=data.get("retail_price", data["standard_price"]),
-            ppn=data.get("ppn", 0),
-            category=data.get("category"),
-            min_stock=data.get("min_stock", 1),
-            max_stock=data.get("max_stock", 9999),
-            supplier_id=data.get("supplier_id"),
-            supplier_name=data.get("supplier_name")
-        )
-        
-        # Create stock entry
-        stock = ProductStock(
-            product_id=data["product_id"],
-            report_date=datetime.now().date(),
-            location=data.get("location"),
-            qty=data["qty"],
-            unit=data["unit"],
-            price=data["standard_price"]
-        )
-        
-        # Save to database
-        db.session.add(product)
-        db.session.add(stock)
-        db.session.commit()
-        
-        return success_response(
-            message="Product created successfully"
-        )
-        
-    except Exception as e:
-        db.session.rollback()
-        current_app.logger.error(f"Product creation error: {str(e)}")
-        return error_response(f"Error creating product: {str(e)}", 500)
-
-
 @inventory_bp.route("/delete/<product_id>", methods=["DELETE"])
 @jwt_required()
 def delete_product(product_id):
-
     """
     Endpoint to delete a product.
+    Products with transactions cannot be deleted.
     """
     try:
         # Get the product
@@ -396,6 +405,40 @@ def delete_product(product_id):
         # Get stock info
         stock = ProductStock.query.filter_by(product_id=product_id).first()
         
+        # Check if product has associated transactions
+        transaction_count = Transaction.query.filter_by(product_id=product_id).count()
+        
+        # Create response data
+        response_data = {
+            "product_id": product_id,
+            "product_name": product.product_name,
+            "has_transactions": transaction_count > 0,
+            "has_stock": stock is not None and stock.qty > 0,
+            "transaction_count": transaction_count
+        }
+        
+        # Check force parameter (for warnings with stock)
+        force_delete = request.args.get('force', 'false').lower() == 'true'
+        
+        if transaction_count > 0:
+            # Product has transactions - completely disallow deletion
+            return jsonify({
+                "success": False,
+                "data": response_data,
+                "message": f"Cannot delete product with {transaction_count} associated transactions.",
+                "deletion_type": "disallowed"
+            }), 400
+        
+        if stock and stock.qty > 0 and not force_delete:
+            # Product has stock but no transactions - return warning but allow deletion
+            return jsonify({
+                "success": False,
+                "data": response_data,
+                "message": f"Product has remaining stock ({stock.qty} {stock.unit}). Confirm deletion?",
+                "deletion_type": "warning"
+            }), 400
+            
+        # No transactions or forced with stock - perform delete        
         # Delete stock first (due to foreign key constraint)
         if stock:
             db.session.delete(stock)
@@ -405,14 +448,15 @@ def delete_product(product_id):
         db.session.commit()
         
         return success_response(
-            message="Product deleted successfully"
+            data=response_data,
+            message="Product deleted successfully",
+            deletion_type="success"
         )
         
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(f"Product deletion error: {str(e)}")
         return error_response(f"Error deleting product: {str(e)}", 500)
-    
 
 @inventory_bp.route("/search", methods=["GET"])
 @jwt_required()
@@ -510,8 +554,6 @@ def get_product_history():
         current_app.logger.error(f"Error retrieving product history: {str(e)}")
         return error_response(f"Error retrieving product history: {str(e)}", 500)
 
-
-# Update this section in your app/routes/inventory.py file's get_product_analysis endpoint
 
 @inventory_bp.route("/product_analysis", methods=["GET"])
 @jwt_required()
@@ -704,4 +746,97 @@ def get_product_analysis():
         current_app.logger.error(f"Error retrieving product analysis: {str(e)}")
         return error_response(f"Error retrieving product analysis: {str(e)}", 500)
     
-    
+
+@inventory_bp.route("/export", methods=["GET"])
+@jwt_required()
+def export_inventory():
+    """Export all inventory data to Excel format"""
+    try:
+        # Get filter parameters
+        category_filter = request.args.get("category", "")
+        
+        # Base query - join Product and ProductStock
+        query = db.session.query(Product, ProductStock).join(
+            ProductStock, Product.product_id == ProductStock.product_id
+        )
+        
+        # Apply category filter if provided
+        if category_filter:
+            query = query.filter(Product.category == category_filter)
+            
+        # Execute the query
+        results = query.all()
+        
+        # Prepare data for export
+        export_data = []
+        for product, stock in results:
+            # Calculate total purchases if available
+            total_purchases = db.session.query(
+                func.sum(Transaction.qty)
+            ).filter(
+                Transaction.product_id == product.product_id
+            ).scalar() or 0
+            
+            # Get supplier name
+            supplier_name = product.supplier_name or "N/A"
+            
+            # Calculate stock value
+            stock_value = float(stock.qty) * float(product.standard_price)
+            
+            export_data.append({
+                'Product ID': product.product_id,
+                'Product Code': product.product_code,
+                'Product Name': product.product_name,
+                'Category': product.category or '',
+                'Standard Price': float(product.standard_price),
+                'Retail Price': float(product.retail_price),
+                'Current Stock': float(stock.qty),
+                'Unit': stock.unit or '',
+                'Min Stock': float(product.min_stock) if product.min_stock else 0,
+                'Max Stock': float(product.max_stock) if product.max_stock else 0,
+                'Stock Value': stock_value,
+                'Supplier': supplier_name,
+                'Location': stock.location or '',
+                'Total Sold': int(total_purchases)
+            })
+        
+        # Convert to dataframe
+        import pandas as pd
+        df = pd.DataFrame(export_data)
+        
+        # Format the date for the filename
+        from datetime import datetime
+        today = datetime.now().strftime('%Y%m%d')
+        
+        # Export as Excel file
+        import tempfile
+        import os
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp:
+            # Write to Excel
+            df.to_excel(temp.name, index=False, engine='openpyxl')
+            temp_name = temp.name
+        
+        # Read the file
+        with open(temp_name, 'rb') as f:
+            data = f.read()
+        
+        # Clean up
+        os.unlink(temp_name)
+        
+        # Prepare the filename
+        filename = f"inventory_export_{today}"
+        if category_filter:
+            filename += f"_{category_filter.replace(' ', '_')}"
+        filename += ".xlsx"
+        
+        # Create response
+        from flask import make_response
+        response = make_response(data)
+        response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+        response.headers["Content-type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        
+        return response
+        
+    except Exception as e:
+        current_app.logger.error(f"Error exporting inventory: {str(e)}")
+        return error_response(f"Error exporting inventory: {str(e)}", 500)

@@ -1,4 +1,5 @@
 # app/routes/import_data.py
+from datetime import datetime, timezone
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
 import pandas as pd
@@ -249,6 +250,12 @@ def import_product_stock():
 
         df["report_date"] = df["report_date"].apply(extract_date)
 
+        # Dictionary to keep track of which products we've updated
+        updated_products = {}
+        new_products = 0
+        updated_count = 0
+        skipped_count = 0
+
         # Iterasi data sebelum dimasukkan ke database
         for index, row in df.iterrows():
             if not row["product_id"] or not row["qty"]:
@@ -263,17 +270,46 @@ def import_product_stock():
                     f"Row {index + 1}: Product ID '{row['product_id']}' not found", 400
                 )
 
-            # Buat instance Stock dengan dictionary comprehension
-            new_stock = ProductStock(
-                **{col: row[col] for col in EXPECTED_COLUMNS.values()}
-            )
+            # Check if this product stock already exists
+            existing_stock = ProductStock.query.filter_by(
+                product_id=row["product_id"]
+            ).first()
 
-            # Tambahkan ke sesi database
-            db.session.add(new_stock)
+            if existing_stock:
+                # Product stock record exists, check the report date
+                if row["report_date"] and existing_stock.report_date and row["report_date"] > existing_stock.report_date:
+                    # Update the existing record as this report is newer
+                    existing_stock.report_date = row["report_date"]
+                    existing_stock.location = row["location"]
+                    existing_stock.qty = row["qty"]
+                    existing_stock.unit = row["unit"]
+                    existing_stock.price = row["price"]
+                    existing_stock.updated_at = datetime.now(timezone.utc)
+                    
+                    updated_products[row["product_id"]] = True
+                    updated_count += 1
+                else:
+                    # Skip this record as the existing one is newer or same date
+                    skipped_count += 1
+                    continue
+            else:
+                # Create a new stock record
+                new_stock = ProductStock(
+                    product_id=row["product_id"],
+                    report_date=row["report_date"],
+                    location=row["location"],
+                    qty=row["qty"],
+                    unit=row["unit"],
+                    price=row["price"]
+                )
+                db.session.add(new_stock)
+                new_products += 1
 
         # Commit transaksi database setelah semua data valid
         db.session.commit()
-        return success_response(message="Product stock imported successfully")
+        return success_response(
+            message=f"Product stock imported successfully. New records: {new_products}, Updated records: {updated_count}, Skipped records: {skipped_count}"
+        )
 
     except Exception as e:
         db.session.rollback()
