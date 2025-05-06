@@ -10,7 +10,6 @@ class User(db.Model):
     username = db.Column(db.String(50), unique=True, nullable=False)
     password_hash = db.Column(db.String(200), nullable=False)
     full_name = db.Column(db.String(100), nullable=True)
-    role = db.Column(db.String(20), default="user")
     is_active = db.Column(db.Boolean, default=True)
     last_login = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
@@ -20,11 +19,10 @@ class User(db.Model):
         onupdate=lambda: datetime.now(timezone.utc),
     )
 
-    def __init__(self, username, password, full_name=None, role="user"):
+    def __init__(self, username, password, full_name=None):
         self.username = username
         self.password_hash = generate_password_hash(password)
         self.full_name = full_name
-        self.role = role
 
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
@@ -34,7 +32,6 @@ class User(db.Model):
             "id": self.id,
             "username": self.username,
             "full_name": self.full_name,
-            "role": self.role,
             "is_active": self.is_active,
             "last_login": self.last_login.isoformat() if self.last_login else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,

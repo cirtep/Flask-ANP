@@ -102,8 +102,8 @@ def run_parameter_tuning_task(job_id):
                 raise ValueError("Insufficient data for parameter tuning. Need at least 12 months of data.")
                 
             # Optional: Apply log transformation to avoid negative forecasts
-            # df_monthly['y_orig'] = df_monthly['y']  # Save original values
-            # df_monthly['y'] = np.log1p(df_monthly['y'])  # log(1 + y) to avoid log(0)
+            df_monthly['y_orig'] = df_monthly['y']  # Save original values
+            df_monthly['y'] = np.log1p(df_monthly['y'])  # log(1 + y) to avoid log(0)
             
             # Generate the grid of parameters to test
             param_grid = {}
@@ -166,10 +166,10 @@ def run_parameter_tuning_task(job_id):
                     )
                     
                     # Convert predictions and actuals back from log space if we applied log transform
-                    # df_cv["yhat"] = np.expm1(df_cv["yhat"])
-                    # df_cv["y"] = np.expm1(df_cv["y"])
-                    # df_cv["yhat_lower"] = np.expm1(df_cv["yhat_lower"])
-                    # df_cv["yhat_upper"] = np.expm1(df_cv["yhat_upper"])
+                    df_cv["yhat"] = np.expm1(df_cv["yhat"])
+                    df_cv["y"] = np.expm1(df_cv["y"])
+                    df_cv["yhat_lower"] = np.expm1(df_cv["yhat_lower"])
+                    df_cv["yhat_upper"] = np.expm1(df_cv["yhat_upper"])
                     
                     # Calculate metrics - standard and with better handling of edge cases
                     df_p = performance_metrics(df_cv)

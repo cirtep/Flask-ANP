@@ -840,3 +840,4 @@ def export_inventory():
     except Exception as e:
         current_app.logger.error(f"Error exporting inventory: {str(e)}")
         return error_response(f"Error exporting inventory: {str(e)}", 500)
+    

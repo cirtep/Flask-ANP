@@ -23,7 +23,6 @@ def create_app(config_class=Config):
     from app.routes.import_data import import_data_bp
     from app.routes.customer import customer_bp
     from app.routes.inventory import inventory_bp
-    from app.routes.inventory_analytics import inventory_analytics_bp 
     from app.routes.forecast import forecast_bp
     from app.routes.goals import goals_bp 
     from app.routes.dashboard import dashboard_bp
@@ -33,7 +32,6 @@ def create_app(config_class=Config):
     app.register_blueprint(import_data_bp, url_prefix="/api/import")
     app.register_blueprint(customer_bp, url_prefix="/api/customer")
     app.register_blueprint(inventory_bp, url_prefix="/api/inventory")
-    app.register_blueprint(inventory_analytics_bp, url_prefix="/api/inventory") 
     app.register_blueprint(forecast_bp, url_prefix="/api/forecast")
     app.register_blueprint(goals_bp, url_prefix="/api/forecast") 
     app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")

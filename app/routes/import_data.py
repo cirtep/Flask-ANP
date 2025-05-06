@@ -1,4 +1,5 @@
 # app/routes/import_data.py
+from calendar import c
 from datetime import datetime, timezone
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
@@ -39,7 +40,7 @@ def import_customers():
     if not file:
         return error_response("No file provided", 400)
     if not allowed_file(file.filename):
-        return error_response("File type not allowed. Accepted: xls, xlsx, csv", 400)
+        return error_response("File type not allowed.", 400)
 
     try:
         # Baca file Excel
@@ -103,10 +104,11 @@ def import_customers():
                 customer_code=row["customer_code"]
             ).first()
             if existing_customer:
-                return error_response(
-                    f"Row {index + 1}: Duplicate customer_code '{row['customer_code']}'",
-                    400,
-                )
+                # return error_response(
+                #     f"Row {index + 1}: Duplicate customer_code '{row['customer_code']}'",
+                #     400,
+                # )
+                continue  # Skip to next row
 
             # Buat instance Customer dengan dictionary comprehension
             new_customer = Customer(
@@ -134,7 +136,7 @@ def import_products():
         return error_response("No file provided", 400)
     if not allowed_file(file.filename):
         return error_response(
-            "File type not allowed. Accepted types: xls, xlsx, csv", 400
+            "File type not allowed.", 400
         )
 
     try:
@@ -172,17 +174,18 @@ def import_products():
 
         # Iterasi data sebelum dimasukkan ke database
         for index, row in df.iterrows():
-            if not row["product_code"] or not row["product_name"]:
+            if not row["product_id"] or not row["product_name"]:
                 return error_response(
-                    f"Row {index + 1}: Product code and name cannot be null", 400
+                    f"Row {index + 1}: Product id and name cannot be null", 400
                 )
 
-            # Cek apakah produk sudah ada berdasarkan product_code
-            if Product.query.filter_by(product_code=row["product_code"]).first():
-                return error_response(
-                    f"Row {index + 1}: Duplicate product_code '{row['product_code']}'",
-                    400,
-                )
+            # Cek apakah produk sudah ada berdasarkan product_id
+            if Product.query.filter_by(product_id=row["product_id"]).first():
+                # return error_response(
+                #     f"Row {index + 1}: Duplicate product_id '{row['product_id']}'",
+                #     400,
+                # )
+                continue  # Skip to next row
 
             # Buat instance Product dengan dictionary comprehension
             new_product = Product(
@@ -210,7 +213,7 @@ def import_product_stock():
         return error_response("No file provided", 400)
     if not allowed_file(file.filename):
         return error_response(
-            "File type not allowed. Accepted types: xls, xlsx, csv", 400
+            "File type not allowed.", 400
         )
 
     try:
@@ -266,9 +269,11 @@ def import_product_stock():
             # Cek apakah produk ada di database sebelum menambahkan stoknya
             product = Product.query.filter_by(product_id=row["product_id"]).first()
             if not product:
-                return error_response(
-                    f"Row {index + 1}: Product ID '{row['product_id']}' not found", 400
-                )
+                # return error_response(
+                #     f"Row {index + 1}: Product ID '{row['product_id']}' not found", 400
+                # )
+                skipped_count += 1
+                continue  # Skip to next row
 
             # Check if this product stock already exists
             existing_stock = ProductStock.query.filter_by(
@@ -325,7 +330,7 @@ def import_transactions():
         return error_response("No file provided", 400)
     if not allowed_file(file.filename):
         return error_response(
-            "File type not allowed. Accepted types: xls, xlsx, csv", 400
+            "File type not allowed.", 400
         )
 
     try:
@@ -381,12 +386,13 @@ def import_transactions():
                     400,
                 )
 
-            # # Cek apakah transaksi sudah ada berdasarkan invoice_id (hindari duplikasi)
-            # if Transaction.query.filter_by(invoice_id=row["invoice_id"]).first():
-            #     return error_response(
-            #         f"Row {index + 1}: Duplicate invoice_id '{row['invoice_id']}'",
-            #         400,
-            #     )
+            # Cek apakah transaksi sudah ada berdasarkan invoice_id (hindari duplikasi)
+            if Transaction.query.filter_by(invoice_id=row["invoice_id"]).first():
+                # return error_response(
+                #     f"Row {index + 1}: Duplicate invoice_id '{row['invoice_id']}'",
+                #     400,
+                # )
+                continue  # Skip to next row
 
             existing = Transaction.query.filter_by(
                 invoice_id=row["invoice_id"],
@@ -395,10 +401,11 @@ def import_transactions():
             ).first()
 
             if existing:
-                return error_response(
-                    f"Row {index + 1}: Duplicate product '{row['product_id']}' with sequence '{row.get('order_sequence')}' in invoice '{row['invoice_id']}'",
-                    400,
-                )
+                # return error_response(
+                #     f"Row {index + 1}: Duplicate product '{row['product_id']}' with sequence '{row.get('order_sequence')}' in invoice '{row['invoice_id']}'",
+                #     400,
+                # )
+                continue
 
             # Cek apakah customer_id sudah ada di database
             customer = Customer.query.filter_by(customer_id=row["customer_id"]).first()
