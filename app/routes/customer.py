@@ -459,7 +459,8 @@ def get_customer_sales(customer_id):
         # Group by month for time series
         monthly_sales = db.session.query(
             func.date_format(Transaction.invoice_date, '%Y-%m-01').label('month'),
-            func.sum(Transaction.total_amount).label('amount')
+            func.sum(Transaction.total_amount).label('amount'),
+            func.count(func.distinct(Transaction.invoice_id)).label('order_count')
         ).filter(
             Transaction.customer_id == customer_id,
             Transaction.invoice_date >= start_date
@@ -469,7 +470,8 @@ def get_customer_sales(customer_id):
         sales_by_month = [
             {
                 "month": datetime.strptime(entry[0], "%Y-%m-%d").strftime("%b %Y"),
-                "amount": float(entry[1])
+                "amount": float(entry[1]),
+                "order_count": int(entry[2])
             }
             for entry in monthly_sales
         ]
