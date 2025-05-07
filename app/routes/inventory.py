@@ -139,6 +139,8 @@ def get_product_detail(product_id):
         if not stock:
             return error_response("Product stock information not found", 404)
             
+        min_stock, max_stock = get_stock_limits(product)
+
         # Combine data
         product_data = {
             # From Product model
@@ -150,8 +152,8 @@ def get_product_detail(product_id):
             "retail_price": float(product.retail_price),
             "ppn": float(product.ppn),
             "category": product.category,
-            "min_stock": float(product.min_stock),
-            "max_stock": float(product.max_stock),
+            "min_stock": min_stock,  
+            "max_stock": max_stock, 
             "supplier_id": product.supplier_id,
             "supplier_name": product.supplier_name,
             "use_forecast": product.use_forecast,
@@ -161,30 +163,6 @@ def get_product_detail(product_id):
             "qty": float(stock.qty),
             "unit": stock.unit,
         }
-        
-        if product.use_forecast:
-            # Get the most recent forecast for this product
-            from app.models.saved_forecast import SavedForecast
-            from sqlalchemy import desc
-            
-            latest_forecast = SavedForecast.query.filter_by(
-                product_id=product_id
-            ).order_by(desc(SavedForecast.forecast_date)).first()
-            
-            if latest_forecast:
-                forecast_data = latest_forecast.get_forecast_data()
-                # Use forecast lower bound as min_stock
-                product_data["min_stock"] = float(forecast_data.get('yhat_lower', 0))
-                # Use forecast upper bound as max_stock
-                product_data["max_stock"] = float(forecast_data.get('yhat_upper', 0))
-            else:
-                # Fall back to regular values if no forecast is available
-                product_data["min_stock"] = float(product.min_stock) if product.min_stock else 0
-                product_data["max_stock"] = float(product.max_stock) if product.max_stock else 0
-        else:
-            # Use the regular min/max stock values
-            product_data["min_stock"] = float(product.min_stock) if product.min_stock else 0
-            product_data["max_stock"] = float(product.max_stock) if product.max_stock else 0
 
         return success_response(
             data=product_data, 
@@ -622,6 +600,8 @@ def export_inventory():
         # Prepare data for export
         export_data = []
         for product, stock in results:
+            min_stock, max_stock = get_stock_limits(product)
+
             # Calculate total purchases if available
             total_purchases = db.session.query(
                 func.sum(Transaction.qty)
@@ -644,12 +624,13 @@ def export_inventory():
                 'Retail Price': float(product.retail_price),
                 'Current Stock': float(stock.qty),
                 'Unit': stock.unit or '',
-                'Min Stock': float(product.min_stock) if product.min_stock else 0,
-                'Max Stock': float(product.max_stock) if product.max_stock else 0,
+                'Min Stock': min_stock,  
+                'Max Stock': max_stock,  
                 'Stock Value': stock_value,
                 'Supplier': supplier_name,
                 'Location': stock.location or '',
-                'Total Sold': int(total_purchases)
+                'Total Sold': int(total_purchases),
+                'Use Forecast': 'Yes' if product.use_forecast else 'No'
             })
         
         # Convert to dataframe

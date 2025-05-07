@@ -7,6 +7,7 @@ from app.models.product_stock import ProductStock
 from app.models.customer import Customer
 from app.models.saved_forecast import SavedForecast
 from app.utils.security import success_response, error_response
+from app.utils.use_forecast import get_stock_limits
 from sqlalchemy import func, desc, and_, extract, distinct
 from datetime import datetime, timedelta
 import calendar
@@ -132,24 +133,27 @@ def dashboard_summary():
         inventory_value = float(inventory_stats.inventory_value or 0)
         
         # Get low stock alerts
-        low_stock_query = db.session.query(
+        all_stock_query = db.session.query(
             Product, ProductStock
         ).join(
             ProductStock, Product.product_id == ProductStock.product_id
-        ).filter(
-            ProductStock.qty <= Product.min_stock
         ).all()
-        
-        low_stock_items = [
-            {
-                "product_id": product.product_id,
-                "product_name": product.product_name,
-                "current_stock": stock.qty,
-                "min_stock": product.min_stock,
-                "unit": stock.unit
-            }
-            for product, stock in low_stock_query
-        ]
+
+        # Then filter using the helper function
+        low_stock_items = []
+        for product, stock in all_stock_query:
+            # Get min_stock considering use_forecast setting
+            min_stock, _ = get_stock_limits(product)
+            
+            # Compare current stock to the appropriate min_stock
+            if stock.qty <= min_stock:
+                low_stock_items.append({
+                    "product_id": product.product_id,
+                    "product_name": product.product_name,
+                    "current_stock": stock.qty,
+                    "min_stock": min_stock,  # Use the value from helper function
+                    "unit": stock.unit
+                })
         
         # ===== Customer Metrics =====
         
