@@ -10,6 +10,7 @@ from sqlalchemy.sql import text
 from app.models.product import Product
 from app.models.product_stock import ProductStock
 from app.models.transaction import Transaction
+from app.models.customer import Customer
 from datetime import datetime, timedelta
 
 inventory_bp = Blueprint("inventory", __name__)
@@ -149,6 +150,7 @@ def get_product_detail(product_id):
             "max_stock": float(product.max_stock),
             "supplier_id": product.supplier_id,
             "supplier_name": product.supplier_name,
+            "use_forecast": product.use_forecast,
             # From ProductStock model
             "report_date": product.created_at.isoformat() if product.created_at else None,
             "location": stock.location,
@@ -156,6 +158,30 @@ def get_product_detail(product_id):
             "unit": stock.unit,
         }
         
+        if product.use_forecast:
+            # Get the most recent forecast for this product
+            from app.models.saved_forecast import SavedForecast
+            from sqlalchemy import desc
+            
+            latest_forecast = SavedForecast.query.filter_by(
+                product_id=product_id
+            ).order_by(desc(SavedForecast.forecast_date)).first()
+            
+            if latest_forecast:
+                forecast_data = latest_forecast.get_forecast_data()
+                # Use forecast lower bound as min_stock
+                product_data["min_stock"] = float(forecast_data.get('yhat_lower', 0))
+                # Use forecast upper bound as max_stock
+                product_data["max_stock"] = float(forecast_data.get('yhat_upper', 0))
+            else:
+                # Fall back to regular values if no forecast is available
+                product_data["min_stock"] = float(product.min_stock) if product.min_stock else 0
+                product_data["max_stock"] = float(product.max_stock) if product.max_stock else 0
+        else:
+            # Use the regular min/max stock values
+            product_data["min_stock"] = float(product.min_stock) if product.min_stock else 0
+            product_data["max_stock"] = float(product.max_stock) if product.max_stock else 0
+
         return success_response(
             data=product_data, 
             message="Product details retrieved successfully"
@@ -176,11 +202,16 @@ def get_product_sales(product_id):
         # Check if product exists
         product = Product.query.filter_by(product_id=product_id).first()
         if not product:
-            return error_response("Product not found", 404)
+            return error_response(f"Product with ID {product_id} not found", 404)
             
         # Get time range filter from query params (default: last 6 months)
         months = int(request.args.get("months", 6))
-        start_date = datetime.now() - timedelta(days=30 * months)
+        if months == 9999:  # "all" time range
+            start_date = datetime(1900, 1, 1)  # Far past date to include all records
+        else:
+            start_date = datetime.now() - timedelta(days=30 * months)
+        
+        today = datetime.now()
         
         # Get all transactions for this product
         transactions = Transaction.query.filter(
@@ -196,6 +227,7 @@ def get_product_sales(product_id):
                     "profit_margin": 0,
                     "sales_by_month": [],
                     "top_customers": [],
+                    "all_customers": [],
                     "recent_transactions": []
                 },
                 message="No sales data available for this product"
@@ -211,10 +243,11 @@ def get_product_sales(product_id):
         if total_cost and total_sales:
             profit_margin = ((total_sales - total_cost) / total_sales) * 100
             
-        # Group by month for time series
+        # Get monthly sales data
         monthly_sales = db.session.query(
             func.date_format(Transaction.invoice_date, '%Y-%m-01').label('month'),
-            func.sum(Transaction.total_amount).label('amount')
+            func.sum(Transaction.total_amount).label('amount'),
+            func.count(func.distinct(Transaction.invoice_id)).label('order_count')
         ).filter(
             Transaction.product_id == product_id,
             Transaction.invoice_date >= start_date
@@ -224,64 +257,158 @@ def get_product_sales(product_id):
         sales_by_month = [
             {
                 "month": datetime.strptime(entry[0], "%Y-%m-%d").strftime("%b %Y"),
-                "amount": float(entry[1])
+                "amount": float(entry[1]),
+                "order_count": int(entry[2])
             }
             for entry in monthly_sales
         ]
         
-        # Get top customers who bought this product
-        top_customers_query = db.session.query(
+        # Get monthly cost data for profit margin calculations
+        monthly_cost_query = db.session.query(
+            func.date_format(Transaction.invoice_date, '%Y-%m-01').label('month'),
+            func.sum(Transaction.total_cost).label('amount')
+        ).filter(
+            Transaction.product_id == product_id,
+            Transaction.invoice_date >= start_date
+        ).group_by('month').order_by('month').all()
+        
+        # Format monthly cost data
+        cost_by_month = [
+            {
+                "month": datetime.strptime(entry[0], "%Y-%m-%d").strftime("%b %Y"),
+                "amount": float(entry[1])
+            }
+            for entry in monthly_cost_query
+        ]
+        
+        # Query all customers who ever purchased this product
+        all_customers_query = db.session.query(
             Transaction.customer_id,
+            Customer.business_name,
+            func.sum(Transaction.qty).label('qty'),
             func.sum(Transaction.total_amount).label('total_amount'),
-            func.sum(Transaction.qty).label('qty')
+            func.min(Transaction.invoice_date).label('first_purchase'),
+            func.max(Transaction.invoice_date).label('last_purchase'),
+            func.count(func.distinct(Transaction.invoice_id)).label('purchase_count')
+        ).join(
+            Customer, Transaction.customer_id == Customer.customer_id
         ).filter(
             Transaction.product_id == product_id,
             Transaction.invoice_date >= start_date
         ).group_by(
-            Transaction.customer_id
+            Transaction.customer_id,
+            Customer.business_name
         ).order_by(
             func.sum(Transaction.total_amount).desc()
-        ).limit(8).all()
+        ).all()
         
-        # Get customer names
-        from app.models.customer import Customer
-        top_customers = []
-        for customer_id, total_amount, qty in top_customers_query:
-            customer = Customer.query.filter_by(customer_id=customer_id).first()
-            if customer:
-                top_customers.append({
-                    "customer_id": customer_id,
-                    "business_name": customer.business_name,
-                    "total_amount": float(total_amount),
-                    "qty": int(qty)
-                })
+        # Format all customers data
+        all_customers = [
+            {
+                "customer_id": cust[0],
+                "business_name": cust[1],
+                "qty": int(cust[2]),
+                "total_amount": float(cust[3]),
+                "first_purchase": cust[4].isoformat() if cust[4] else None,
+                "last_purchase": cust[5].isoformat() if cust[5] else None,
+                "purchase_count": int(cust[6])
+            }
+            for cust in all_customers_query
+        ]
+        
+        # Get top 8 customers for pie chart
+        top_customers = all_customers[:8] if all_customers else []
         
         # Get recent transactions
-        recent_transactions = []
-        unique_invoices = set()
+        recent_transactions_query = db.session.query(
+            Transaction.invoice_id,
+            Transaction.invoice_date,
+            Transaction.qty,
+            Transaction.total_amount,
+            Transaction.customer_id,
+            Customer.business_name.label('customer_name')
+        ).join(
+            Customer, Transaction.customer_id == Customer.customer_id
+        ).filter(
+            Transaction.product_id == product_id
+        ).order_by(
+            Transaction.invoice_date.desc()
+        ).limit(20).all()
         
-        for t in sorted(transactions, key=lambda x: x.invoice_date, reverse=True):
-            if len(unique_invoices) >= 10:
-                break
-                
-            if t.invoice_id not in unique_invoices:
-                unique_invoices.add(t.invoice_id)
-                recent_transactions.append({
-                    "invoice_id": t.invoice_id,
-                    "invoice_date": t.invoice_date.isoformat() if t.invoice_date else None,
-                    "customer_id": t.customer_id,
-                    "qty": t.qty,
-                    "total_amount": float(t.total_amount)
-                })
+        # Format recent transactions
+        recent_transactions = [
+            {
+                "invoice_id": txn[0],
+                "invoice_date": txn[1].isoformat() if txn[1] else None,
+                "qty": txn[2],
+                "total_amount": float(txn[3]),
+                "customer_id": txn[4],
+                "customer_name": txn[5]
+            }
+            for txn in recent_transactions_query
+        ]
         
+        # Calculate YTD and previous YTD sales for comparison
+        current_year = datetime.now().year
+        this_year_start = datetime(current_year, 1, 1)
+        previous_year_start = datetime(current_year - 1, 1, 1)
+        same_day_previous_year = datetime(current_year - 1, today.month, today.day)
+        
+        # This year to date
+        this_ytd_sales = db.session.query(
+            func.sum(Transaction.total_amount)
+        ).filter(
+            Transaction.product_id == product_id,
+            Transaction.invoice_date >= this_year_start,
+            Transaction.invoice_date <= today
+        ).scalar() or 0
+        
+        # Previous year to date (same period)
+        previous_ytd_sales = db.session.query(
+            func.sum(Transaction.total_amount)
+        ).filter(
+            Transaction.product_id == product_id,
+            Transaction.invoice_date >= previous_year_start,
+            Transaction.invoice_date <= same_day_previous_year
+        ).scalar() or 0
+        
+        # This month sales
+        this_month_start = datetime(today.year, today.month, 1)
+        this_month_sales = db.session.query(
+            func.sum(Transaction.total_amount)
+        ).filter(
+            Transaction.product_id == product_id,
+            Transaction.invoice_date >= this_month_start
+        ).scalar() or 0
+        
+        # Calculate YTD growth
+        ytd_growth = 0
+        if previous_ytd_sales > 0:
+            ytd_growth = ((this_ytd_sales - previous_ytd_sales) / previous_ytd_sales) * 100
+        
+        # Calculate average quantity per invoice (transaction)
+        avg_qty_per_invoice_query = db.session.query(
+            func.avg(Transaction.qty)
+        ).filter(
+            Transaction.product_id == product_id,
+            Transaction.invoice_date >= start_date
+        ).scalar() or 0
+
         # Return the compiled data
         result = {
-            "total_sales": total_sales,
-            "total_qty": total_qty,
-            "profit_margin": profit_margin,
+            "total_sales": float(total_sales),
+            "total_qty": int(total_qty),
+            "profit_margin": float(profit_margin) if profit_margin is not None else None,
             "sales_by_month": sales_by_month,
+            "cost_by_month": cost_by_month,
+            "all_customers": all_customers,
             "top_customers": top_customers,
-            "recent_transactions": recent_transactions
+            "recent_transactions": recent_transactions,
+            "this_ytd_sales": float(this_ytd_sales),
+            "previous_ytd_sales": float(previous_ytd_sales),
+            "this_month_sales": float(this_month_sales),
+            "ytd_growth": float(ytd_growth),
+            "avg_qty_per_invoice": float(avg_qty_per_invoice_query),
         }
         
         return success_response(
@@ -293,12 +420,13 @@ def get_product_sales(product_id):
         current_app.logger.error(f"Product sales retrieval error: {str(e)}")
         return error_response(f"Error retrieving product sales data: {str(e)}", 500)
 
-
+#
 @inventory_bp.route("/update/<product_id>", methods=["PUT"])
 @jwt_required()
 def update_product(product_id):
     """
     Endpoint to update product information and stock.
+    All fields can be edited.
     """
     try:
         # Get the product
@@ -343,7 +471,11 @@ def update_product(product_id):
             product.supplier_id = data['supplier_id']
         if 'supplier_name' in data:
             product.supplier_name = data['supplier_name']
-                
+        if 'ppn' in data and data['ppn'] is not None:
+            product.ppn = data['ppn']
+        if 'use_forecast' in data:
+            product.use_forecast = bool(data['use_forecast'])
+
         # Update stock fields
         if 'qty' in data and data['qty'] is not None:
             stock.qty = data['qty']
@@ -373,7 +505,10 @@ def update_product(product_id):
             "category": product.category,
             "min_stock": float(product.min_stock) if product.min_stock else 0,
             "max_stock": float(product.max_stock) if product.max_stock else 0,
+            "supplier_id": product.supplier_id,
             "supplier_name": product.supplier_name,
+            "ppn": float(product.ppn) if product.ppn else 0,
+            "use_forecast": product.use_forecast,
             "qty": float(stock.qty),
             "unit": stock.unit,
             "location": stock.location
@@ -388,6 +523,8 @@ def update_product(product_id):
         db.session.rollback()
         current_app.logger.error(f"Product update error: {str(e)}")
         return error_response(f"Error updating product: {str(e)}", 500)
+
+
 
 @inventory_bp.route("/delete/<product_id>", methods=["DELETE"])
 @jwt_required()
@@ -458,293 +595,293 @@ def delete_product(product_id):
         current_app.logger.error(f"Product deletion error: {str(e)}")
         return error_response(f"Error deleting product: {str(e)}", 500)
 
-@inventory_bp.route("/search", methods=["GET"])
-@jwt_required()
-def search_products():
-    """Search for products by name or code"""
-    try:
-        query = request.args.get("q", "")
-        if not query or len(query) < 2:
-            return success_response(data=[], message="Query too short")
+# @inventory_bp.route("/search", methods=["GET"])
+# @jwt_required()
+# def search_products():
+#     """Search for products by name or code"""
+#     try:
+#         query = request.args.get("q", "")
+#         if not query or len(query) < 2:
+#             return success_response(data=[], message="Query too short")
         
-        # Search in product name and code
-        products = db.session.query(Product, ProductStock).join(
-            ProductStock, 
-            Product.product_id == ProductStock.product_id
-        ).filter(
-            or_(
-                Product.product_name.ilike(f"%{query}%"),
-                Product.product_code.ilike(f"%{query}%"),
-                Product.product_id.ilike(f"%{query}%")
-            )
-        ).limit(10).all()
+#         # Search in product name and code
+#         products = db.session.query(Product, ProductStock).join(
+#             ProductStock, 
+#             Product.product_id == ProductStock.product_id
+#         ).filter(
+#             or_(
+#                 Product.product_name.ilike(f"%{query}%"),
+#                 Product.product_code.ilike(f"%{query}%"),
+#                 Product.product_id.ilike(f"%{query}%")
+#             )
+#         ).limit(10).all()
         
-        # Format results
-        results = []
-        for product, stock in products:
-            results.append({
-                "product_id": product.product_id,
-                "product_code": product.product_code,
-                "product_name": product.product_name,
-                "category": product.category,
-                "standard_price": float(product.standard_price),
-                "qty": float(stock.qty),
-                "unit": stock.unit,
-                "min_stock": float(product.min_stock) if product.min_stock else 0,
-                "max_stock": float(product.max_stock) if product.max_stock else 0,
-            })
+#         # Format results
+#         results = []
+#         for product, stock in products:
+#             results.append({
+#                 "product_id": product.product_id,
+#                 "product_code": product.product_code,
+#                 "product_name": product.product_name,
+#                 "category": product.category,
+#                 "standard_price": float(product.standard_price),
+#                 "qty": float(stock.qty),
+#                 "unit": stock.unit,
+#                 "min_stock": float(product.min_stock) if product.min_stock else 0,
+#                 "max_stock": float(product.max_stock) if product.max_stock else 0,
+#             })
         
-        return success_response(
-            data=results,
-            message="Products found"
-        )
+#         return success_response(
+#             data=results,
+#             message="Products found"
+#         )
         
-    except Exception as e:
-        current_app.logger.error(f"Error searching products: {str(e)}")
-        return error_response(f"Error searching products: {str(e)}", 500)
+#     except Exception as e:
+#         current_app.logger.error(f"Error searching products: {str(e)}")
+#         return error_response(f"Error searching products: {str(e)}", 500)
 
 
-@inventory_bp.route("/product_history", methods=["GET"])
-@jwt_required()
-def get_product_history():
-    """Get historical sales data for a product"""
-    try:
-        product_id = request.args.get("product_id")
-        months = int(request.args.get("months", 24))  # Default to 24 months
+# @inventory_bp.route("/product_history", methods=["GET"])
+# @jwt_required()
+# def get_product_history():
+#     """Get historical sales data for a product"""
+#     try:
+#         product_id = request.args.get("product_id")
+#         months = int(request.args.get("months", 24))  # Default to 24 months
         
-        if not product_id:
-            return error_response("product_id is required", 400)
+#         if not product_id:
+#             return error_response("product_id is required", 400)
         
-        # Get product info
-        product = Product.query.filter_by(product_id=product_id).first()
-        if not product:
-            return error_response(f"Product with ID {product_id} not found", 404)
+#         # Get product info
+#         product = Product.query.filter_by(product_id=product_id).first()
+#         if not product:
+#             return error_response(f"Product with ID {product_id} not found", 404)
         
-        # Get sales history (aggregate by month)
-        from sqlalchemy import func, desc
-        from datetime import datetime, timedelta
+#         # Get sales history (aggregate by month)
+#         from sqlalchemy import func, desc
+#         from datetime import datetime, timedelta
         
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=30 * months)
+#         end_date = datetime.now()
+#         start_date = end_date - timedelta(days=30 * months)
         
-        # Query monthly sales
-        sales_history = db.session.query(
-            func.date_format(Transaction.invoice_date, '%Y-%m-01').label('date'),
-            func.sum(Transaction.qty).label('quantity')
-        ).filter(
-            Transaction.product_id == product_id,
-            Transaction.invoice_date >= start_date,
-            Transaction.invoice_date <= end_date
-        ).group_by('date').order_by('date').all()
+#         # Query monthly sales
+#         sales_history = db.session.query(
+#             func.date_format(Transaction.invoice_date, '%Y-%m-01').label('date'),
+#             func.sum(Transaction.qty).label('quantity')
+#         ).filter(
+#             Transaction.product_id == product_id,
+#             Transaction.invoice_date >= start_date,
+#             Transaction.invoice_date <= end_date
+#         ).group_by('date').order_by('date').all()
         
-        # Format results
-        results = []
-        for entry in sales_history:
-            results.append({
-                "date": entry.date,
-                "quantity": float(entry.quantity)
-            })
+#         # Format results
+#         results = []
+#         for entry in sales_history:
+#             results.append({
+#                 "date": entry.date,
+#                 "quantity": float(entry.quantity)
+#             })
         
-        return success_response(
-            data=results,
-            message="Product history retrieved successfully"
-        )
+#         return success_response(
+#             data=results,
+#             message="Product history retrieved successfully"
+#         )
         
-    except Exception as e:
-        current_app.logger.error(f"Error retrieving product history: {str(e)}")
-        return error_response(f"Error retrieving product history: {str(e)}", 500)
+#     except Exception as e:
+#         current_app.logger.error(f"Error retrieving product history: {str(e)}")
+#         return error_response(f"Error retrieving product history: {str(e)}", 500)
 
 
-@inventory_bp.route("/product_analysis", methods=["GET"])
-@jwt_required()
-def get_product_analysis():
-    """Get detailed analysis for a product"""
-    try:
-        product_id = request.args.get("product_id")
+# @inventory_bp.route("/product_analysis", methods=["GET"])
+# @jwt_required()
+# def get_product_analysis():
+#     """Get detailed analysis for a product"""
+#     try:
+#         product_id = request.args.get("product_id")
         
-        if not product_id:
-            return error_response("product_id is required", 400)
+#         if not product_id:
+#             return error_response("product_id is required", 400)
         
-        # Get product and stock info
-        product_data = db.session.query(Product, ProductStock).join(
-            ProductStock, 
-            Product.product_id == ProductStock.product_id
-        ).filter(
-            Product.product_id == product_id
-        ).first()
+#         # Get product and stock info
+#         product_data = db.session.query(Product, ProductStock).join(
+#             ProductStock, 
+#             Product.product_id == ProductStock.product_id
+#         ).filter(
+#             Product.product_id == product_id
+#         ).first()
         
-        if not product_data:
-            return error_response(f"Product with ID {product_id} not found", 404)
+#         if not product_data:
+#             return error_response(f"Product with ID {product_id} not found", 404)
         
-        product, stock = product_data
+#         product, stock = product_data
         
-        # Get sales history for different time periods
-        from sqlalchemy import func
-        from datetime import datetime, timedelta
+#         # Get sales history for different time periods
+#         from sqlalchemy import func
+#         from datetime import datetime, timedelta
         
-        now = datetime.now()
+#         now = datetime.now()
         
-        # Last 30 days
-        thirty_days_ago = now - timedelta(days=30)
-        sales_30_days_query = db.session.query(
-            func.sum(Transaction.qty).label('quantity'),
-            func.sum(Transaction.total_amount).label('revenue'),
-            func.sum(Transaction.total_cost).label('cost')
-        ).filter(
-            Transaction.product_id == product_id,
-            Transaction.invoice_date >= thirty_days_ago
-        ).first()
+#         # Last 30 days
+#         thirty_days_ago = now - timedelta(days=30)
+#         sales_30_days_query = db.session.query(
+#             func.sum(Transaction.qty).label('quantity'),
+#             func.sum(Transaction.total_amount).label('revenue'),
+#             func.sum(Transaction.total_cost).label('cost')
+#         ).filter(
+#             Transaction.product_id == product_id,
+#             Transaction.invoice_date >= thirty_days_ago
+#         ).first()
         
-        sales_30_days = int(sales_30_days_query.quantity or 0)
-        revenue_30_days = float(sales_30_days_query.revenue or 0)
-        cost_30_days = float(sales_30_days_query.cost or 0)
+#         sales_30_days = int(sales_30_days_query.quantity or 0)
+#         revenue_30_days = float(sales_30_days_query.revenue or 0)
+#         cost_30_days = float(sales_30_days_query.cost or 0)
         
-        # Last 90 days (3 months)
-        ninety_days_ago = now - timedelta(days=90)
-        sales_90_days_query = db.session.query(
-            func.sum(Transaction.qty).label('quantity'),
-            func.sum(Transaction.total_amount).label('revenue'),
-            func.sum(Transaction.total_cost).label('cost')
-        ).filter(
-            Transaction.product_id == product_id,
-            Transaction.invoice_date >= ninety_days_ago
-        ).first()
+#         # Last 90 days (3 months)
+#         ninety_days_ago = now - timedelta(days=90)
+#         sales_90_days_query = db.session.query(
+#             func.sum(Transaction.qty).label('quantity'),
+#             func.sum(Transaction.total_amount).label('revenue'),
+#             func.sum(Transaction.total_cost).label('cost')
+#         ).filter(
+#             Transaction.product_id == product_id,
+#             Transaction.invoice_date >= ninety_days_ago
+#         ).first()
         
-        sales_90_days = int(sales_90_days_query.quantity or 0)
-        revenue_90_days = float(sales_90_days_query.revenue or 0)
-        cost_90_days = float(sales_90_days_query.cost or 0)
+#         sales_90_days = int(sales_90_days_query.quantity or 0)
+#         revenue_90_days = float(sales_90_days_query.revenue or 0)
+#         cost_90_days = float(sales_90_days_query.cost or 0)
         
-        # Last 6 months (180 days)
-        six_months_ago = now - timedelta(days=180)
-        sales_6_months_query = db.session.query(
-            func.sum(Transaction.qty).label('quantity'),
-            func.sum(Transaction.total_amount).label('revenue'),
-            func.sum(Transaction.total_cost).label('cost')
-        ).filter(
-            Transaction.product_id == product_id,
-            Transaction.invoice_date >= six_months_ago
-        ).first()
+#         # Last 6 months (180 days)
+#         six_months_ago = now - timedelta(days=180)
+#         sales_6_months_query = db.session.query(
+#             func.sum(Transaction.qty).label('quantity'),
+#             func.sum(Transaction.total_amount).label('revenue'),
+#             func.sum(Transaction.total_cost).label('cost')
+#         ).filter(
+#             Transaction.product_id == product_id,
+#             Transaction.invoice_date >= six_months_ago
+#         ).first()
         
-        sales_6_months = int(sales_6_months_query.quantity or 0)
-        revenue_6_months = float(sales_6_months_query.revenue or 0)
-        cost_6_months = float(sales_6_months_query.cost or 0)
+#         sales_6_months = int(sales_6_months_query.quantity or 0)
+#         revenue_6_months = float(sales_6_months_query.revenue or 0)
+#         cost_6_months = float(sales_6_months_query.cost or 0)
         
-        # Last 12 months
-        twelve_months_ago = now - timedelta(days=365)
-        sales_12_months_query = db.session.query(
-            func.sum(Transaction.qty).label('quantity'),
-            func.sum(Transaction.total_amount).label('revenue'),
-            func.sum(Transaction.total_cost).label('cost')
-        ).filter(
-            Transaction.product_id == product_id,
-            Transaction.invoice_date >= twelve_months_ago
-        ).first()
+#         # Last 12 months
+#         twelve_months_ago = now - timedelta(days=365)
+#         sales_12_months_query = db.session.query(
+#             func.sum(Transaction.qty).label('quantity'),
+#             func.sum(Transaction.total_amount).label('revenue'),
+#             func.sum(Transaction.total_cost).label('cost')
+#         ).filter(
+#             Transaction.product_id == product_id,
+#             Transaction.invoice_date >= twelve_months_ago
+#         ).first()
         
-        sales_12_months = int(sales_12_months_query.quantity or 0)
-        revenue_12_months = float(sales_12_months_query.revenue or 0)
-        cost_12_months = float(sales_12_months_query.cost or 0)
+#         sales_12_months = int(sales_12_months_query.quantity or 0)
+#         revenue_12_months = float(sales_12_months_query.revenue or 0)
+#         cost_12_months = float(sales_12_months_query.cost or 0)
         
-        # Calculate total revenue and profit
-        total_revenue = revenue_12_months
-        total_cost = cost_12_months
-        gross_profit = total_revenue - total_cost
+#         # Calculate total revenue and profit
+#         total_revenue = revenue_12_months
+#         total_cost = cost_12_months
+#         gross_profit = total_revenue - total_cost
         
-        # Calculate profit margin percentage
-        profit_margin = 0
-        if total_revenue > 0:
-            profit_margin = (gross_profit / total_revenue) * 100
+#         # Calculate profit margin percentage
+#         profit_margin = 0
+#         if total_revenue > 0:
+#             profit_margin = (gross_profit / total_revenue) * 100
             
-        # Previous 12 months (for trend comparison)
-        twenty_four_months_ago = now - timedelta(days=730)
-        prev_12_months_sales = db.session.query(func.sum(Transaction.qty)).filter(
-            Transaction.product_id == product_id,
-            Transaction.invoice_date >= twenty_four_months_ago,
-            Transaction.invoice_date < twelve_months_ago
-        ).scalar() or 0
+#         # Previous 12 months (for trend comparison)
+#         twenty_four_months_ago = now - timedelta(days=730)
+#         prev_12_months_sales = db.session.query(func.sum(Transaction.qty)).filter(
+#             Transaction.product_id == product_id,
+#             Transaction.invoice_date >= twenty_four_months_ago,
+#             Transaction.invoice_date < twelve_months_ago
+#         ).scalar() or 0
         
-        # Calculate sales trend percentage
-        sales_trend = 0
-        if prev_12_months_sales > 0:
-            sales_trend = ((sales_12_months - prev_12_months_sales) / prev_12_months_sales) * 100
+#         # Calculate sales trend percentage
+#         sales_trend = 0
+#         if prev_12_months_sales > 0:
+#             sales_trend = ((sales_12_months - prev_12_months_sales) / prev_12_months_sales) * 100
         
-        # Calculate monthly demand rate
-        monthly_demand_rate = sales_12_months / 12
-        weekly_demand_rate = monthly_demand_rate / 4.33  # Average weeks per month
-        daily_demand_rate = monthly_demand_rate / 30.44  # Average days per month
+#         # Calculate monthly demand rate
+#         monthly_demand_rate = sales_12_months / 12
+#         weekly_demand_rate = monthly_demand_rate / 4.33  # Average weeks per month
+#         daily_demand_rate = monthly_demand_rate / 30.44  # Average days per month
         
-        # Calculate seasonal variability
-        monthly_sales = db.session.query(
-            func.date_format(Transaction.invoice_date, '%Y-%m-01').label('month'),
-            func.sum(Transaction.qty).label('quantity')
-        ).filter(
-            Transaction.product_id == product_id,
-            Transaction.invoice_date >= twelve_months_ago
-        ).group_by('month').all()
+#         # Calculate seasonal variability
+#         monthly_sales = db.session.query(
+#             func.date_format(Transaction.invoice_date, '%Y-%m-01').label('month'),
+#             func.sum(Transaction.qty).label('quantity')
+#         ).filter(
+#             Transaction.product_id == product_id,
+#             Transaction.invoice_date >= twelve_months_ago
+#         ).group_by('month').all()
         
-        seasonal_variability = 0
-        months_with_sales = len(monthly_sales)
+#         seasonal_variability = 0
+#         months_with_sales = len(monthly_sales)
         
-        if months_with_sales > 1:
-            quantities = [float(entry.quantity) for entry in monthly_sales]
-            avg = sum(quantities) / len(quantities)
-            if avg > 0:
-                stddev = (sum((q - avg) ** 2 for q in quantities) / len(quantities)) ** 0.5
-                seasonal_variability = (stddev / avg) * 100
+#         if months_with_sales > 1:
+#             quantities = [float(entry.quantity) for entry in monthly_sales]
+#             avg = sum(quantities) / len(quantities)
+#             if avg > 0:
+#                 stddev = (sum((q - avg) ** 2 for q in quantities) / len(quantities)) ** 0.5
+#                 seasonal_variability = (stddev / avg) * 100
         
-        # Calculate stock coverage (in days) based on daily demand rate
-        current_stock = float(stock.qty) if stock else 0
-        stock_coverage = 0
-        if daily_demand_rate > 0:
-            stock_coverage = int(current_stock / daily_demand_rate)
+#         # Calculate stock coverage (in days) based on daily demand rate
+#         current_stock = float(stock.qty) if stock else 0
+#         stock_coverage = 0
+#         if daily_demand_rate > 0:
+#             stock_coverage = int(current_stock / daily_demand_rate)
         
-        # Determine if reorder is needed
-        min_stock = float(product.min_stock) if product.min_stock else 0
-        reorder_alert = current_stock <= min_stock
+#         # Determine if reorder is needed
+#         min_stock = float(product.min_stock) if product.min_stock else 0
+#         reorder_alert = current_stock <= min_stock
         
-        # Last restocked date (if available)
-        last_restocked = db.session.query(
-            ProductStock.report_date
-        ).filter(
-            ProductStock.product_id == product_id
-        ).order_by(
-            ProductStock.report_date.desc()
-        ).first()
+#         # Last restocked date (if available)
+#         last_restocked = db.session.query(
+#             ProductStock.report_date
+#         ).filter(
+#             ProductStock.product_id == product_id
+#         ).order_by(
+#             ProductStock.report_date.desc()
+#         ).first()
         
-        last_restocked_date = last_restocked[0].strftime("%Y-%m-%d") if last_restocked else None
+#         last_restocked_date = last_restocked[0].strftime("%Y-%m-%d") if last_restocked else None
         
-        # Compile the analysis data
-        analysis = {
-            "last_restocked": last_restocked_date,
-            "supplier_name": product.supplier_name,
-            "min_stock": float(product.min_stock) if product.min_stock else 0,
-            "max_stock": float(product.max_stock) if product.max_stock else 0,
-            "standard_price": float(product.standard_price),
-            "sales_30_days": sales_30_days,
-            "sales_90_days": sales_90_days,
-            "sales_6_months": sales_6_months,
-            "sales_12_months": sales_12_months,
-            "total_revenue": total_revenue,
-            "total_cost": total_cost,
-            "gross_profit": gross_profit,
-            "profit_margin": profit_margin,
-            "sales_trend": sales_trend,
-            "avg_monthly_sales": monthly_demand_rate,
-            "monthly_demand_rate": monthly_demand_rate,
-            "weekly_demand_rate": weekly_demand_rate,
-            "daily_demand_rate": daily_demand_rate,
-            "seasonal_variability": seasonal_variability,
-            "stock_coverage": stock_coverage,
-            "reorder_alert": reorder_alert
-        }
+#         # Compile the analysis data
+#         analysis = {
+#             "last_restocked": last_restocked_date,
+#             "supplier_name": product.supplier_name,
+#             "min_stock": float(product.min_stock) if product.min_stock else 0,
+#             "max_stock": float(product.max_stock) if product.max_stock else 0,
+#             "standard_price": float(product.standard_price),
+#             "sales_30_days": sales_30_days,
+#             "sales_90_days": sales_90_days,
+#             "sales_6_months": sales_6_months,
+#             "sales_12_months": sales_12_months,
+#             "total_revenue": total_revenue,
+#             "total_cost": total_cost,
+#             "gross_profit": gross_profit,
+#             "profit_margin": profit_margin,
+#             "sales_trend": sales_trend,
+#             "avg_monthly_sales": monthly_demand_rate,
+#             "monthly_demand_rate": monthly_demand_rate,
+#             "weekly_demand_rate": weekly_demand_rate,
+#             "daily_demand_rate": daily_demand_rate,
+#             "seasonal_variability": seasonal_variability,
+#             "stock_coverage": stock_coverage,
+#             "reorder_alert": reorder_alert
+#         }
         
-        return success_response(
-            data=analysis,
-            message="Product analysis retrieved successfully"
-        )
+#         return success_response(
+#             data=analysis,
+#             message="Product analysis retrieved successfully"
+#         )
         
-    except Exception as e:
-        current_app.logger.error(f"Error retrieving product analysis: {str(e)}")
-        return error_response(f"Error retrieving product analysis: {str(e)}", 500)
+#     except Exception as e:
+#         current_app.logger.error(f"Error retrieving product analysis: {str(e)}")
+#         return error_response(f"Error retrieving product analysis: {str(e)}", 500)
     
 
 @inventory_bp.route("/export", methods=["GET"])

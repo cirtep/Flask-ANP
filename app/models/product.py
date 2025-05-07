@@ -21,6 +21,7 @@ class Product(db.Model):
     max_stock = db.Column(db.Integer, nullable=True, default=0)  # nstkmax (stok max)
     supplier_id = db.Column(db.String(50), nullable=True)  # supp (id supplier)
     supplier_name = db.Column(db.String(255), nullable=True)  # namasupp (nama supplier)
+    use_forecast = db.Column(db.Boolean, nullable=False, default=False)  # Default to false for existing records
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(
         db.DateTime,
@@ -43,6 +44,7 @@ class Product(db.Model):
             "max_stock": self.max_stock,
             "supplier_id": self.supplier_id,
             "supplier_name": self.supplier_name,
+            "use_forecast": self.use_forecast,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
