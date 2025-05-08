@@ -314,6 +314,7 @@ def get_product_sales(product_id):
             Transaction.qty,
             Transaction.total_amount,
             Transaction.customer_id,
+            Transaction.total_cost,
             Customer.business_name.label('customer_name')
         ).join(
             Customer, Transaction.customer_id == Customer.customer_id
@@ -330,6 +331,7 @@ def get_product_sales(product_id):
                 "invoice_date": txn[1].isoformat() if txn[1] else None,
                 "qty": txn[2],
                 "total_amount": float(txn[3]),
+                "total_cost": float(txn[5]) if txn[5] else None,
                 "customer_id": txn[4],
                 "customer_name": txn[5]
             }
