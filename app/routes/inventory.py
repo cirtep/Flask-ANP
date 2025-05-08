@@ -229,7 +229,8 @@ def get_product_sales(product_id):
         monthly_sales = db.session.query(
             func.date_format(Transaction.invoice_date, '%Y-%m-01').label('month'),
             func.sum(Transaction.total_amount).label('amount'),
-            func.count(func.distinct(Transaction.invoice_id)).label('order_count')
+            func.count(func.distinct(Transaction.invoice_id)).label('order_count'),
+            func.sum(Transaction.qty).label('qty')
         ).filter(
             Transaction.product_id == product_id,
             Transaction.invoice_date >= start_date
@@ -240,7 +241,8 @@ def get_product_sales(product_id):
             {
                 "month": datetime.strptime(entry[0], "%Y-%m-%d").strftime("%b %Y"),
                 "amount": float(entry[1]),
-                "order_count": int(entry[2])
+                "order_count": int(entry[2]),
+                "qty": int(entry[3])
             }
             for entry in monthly_sales
         ]
@@ -248,7 +250,9 @@ def get_product_sales(product_id):
         # Get monthly cost data for profit margin calculations
         monthly_cost_query = db.session.query(
             func.date_format(Transaction.invoice_date, '%Y-%m-01').label('month'),
-            func.sum(Transaction.total_cost).label('amount')
+            func.sum(Transaction.total_cost).label('amount'),
+            func.count(func.distinct(Transaction.invoice_id)).label('order_count'),
+            func.sum(Transaction.qty).label('qty')
         ).filter(
             Transaction.product_id == product_id,
             Transaction.invoice_date >= start_date
@@ -258,7 +262,9 @@ def get_product_sales(product_id):
         cost_by_month = [
             {
                 "month": datetime.strptime(entry[0], "%Y-%m-%d").strftime("%b %Y"),
-                "amount": float(entry[1])
+                "amount": float(entry[1]),
+                "order_count": int(entry[2]),
+                "qty": int(entry[3])
             }
             for entry in monthly_cost_query
         ]
