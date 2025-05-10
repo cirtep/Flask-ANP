@@ -721,3 +721,6 @@ def get_goals_data():
     except Exception as e:
         current_app.logger.error(f"Error retrieving goals data: {str(e)}")
         return error_response(f"Error retrieving goals data: {str(e)}", 500)  
+
+
+

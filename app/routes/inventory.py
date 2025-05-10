@@ -58,6 +58,8 @@ def get_inventory():
         for product, stock in results:
             # Get sales data for this product
             sales = product_sales.get(product.product_id, {'total_amount': 0, 'total_qty': 0})
+            normal_min_stock = float(product.min_stock) if product.min_stock else 0
+            normal_max_stock = float(product.max_stock) if product.max_stock else 0
             min_stock, max_stock = get_stock_limits(product)
 
             item = {
@@ -72,6 +74,8 @@ def get_inventory():
                 "category": product.category,
                 "min_stock": min_stock,
                 "max_stock": max_stock,
+                "normal_min_stock": normal_min_stock,
+                "normal_max_stock": normal_max_stock,
                 "use_forecast": product.use_forecast,
                 "supplier_id": product.supplier_id,
                 "supplier_name": product.supplier_name,
@@ -925,3 +929,5 @@ def get_product_analysis():
     except Exception as e:
         current_app.logger.error(f"Error retrieving product analysis: {str(e)}")
         return error_response(f"Error retrieving product analysis: {str(e)}", 500)
+
+
