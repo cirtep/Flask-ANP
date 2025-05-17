@@ -337,7 +337,7 @@ def get_product_sales(product_id):
                 "total_amount": float(txn[3]),
                 "total_cost": float(txn[5]) if txn[5] else None,
                 "customer_id": txn[4],
-                "customer_name": txn[5]
+                "customer_name": txn[6]
             }
             for txn in recent_transactions_query
         ]
@@ -580,7 +580,7 @@ def delete_product(product_id):
         return success_response(
             data=response_data,
             message="Product deleted successfully",
-            deletion_type="success"
+            # deletion_type="success"
         )
         
     except Exception as e:
@@ -588,6 +588,98 @@ def delete_product(product_id):
         current_app.logger.error(f"Product deletion error: {str(e)}")
         return error_response(f"Error deleting product: {str(e)}", 500)
 
+
+# @inventory_bp.route("/export", methods=["GET"])
+# @jwt_required()
+# def export_inventory():
+#     """Export all inventory data to Excel format"""
+#     try:
+#         # Get filter parameters
+#         category_filter = request.args.get("category", "")
+        
+#         # Base query - join Product and ProductStock
+#         query = db.session.query(Product, ProductStock).join(
+#             ProductStock, Product.product_id == ProductStock.product_id
+#         )
+        
+#         # Apply category filter if provided
+#         if category_filter:
+#             query = query.filter(Product.category == category_filter)
+            
+#         # Execute the query
+#         results = query.all()
+        
+#         # Prepare data for export
+#         export_data = []
+#         for product, stock in results:
+#             min_stock, max_stock = get_stock_limits(product)
+
+#             # Calculate total purchases if available
+#             total_purchases = db.session.query(
+#                 func.sum(Transaction.qty)
+#             ).filter(
+#                 Transaction.product_id == product.product_id
+#             ).scalar() or 0
+            
+#             # Get supplier name
+#             supplier_name = product.supplier_name or "N/A"
+            
+#             # Calculate stock value
+#             stock_value = float(stock.qty) * float(product.standard_price)
+            
+#             export_data.append({
+#                 'Product ID': product.product_id,
+#                 'Product Code': product.product_code,
+#                 'Product Name': product.product_name,
+#                 'Category': product.category or '',
+#                 'Standard Price': float(product.standard_price),
+#                 'Retail Price': float(product.retail_price),
+#                 'Current Stock': float(stock.qty),
+#                 'Unit': stock.unit or '',
+#                 'Min Stock': min_stock,  
+#                 'Max Stock': max_stock,  
+#                 'Stock Value': stock_value,
+#                 'Supplier': supplier_name,
+#                 'Location': stock.location or '',
+#                 'Total Sold': int(total_purchases),
+#                 'Use Forecast': 'Yes' if product.use_forecast else 'No'
+#             })
+        
+#         # Convert to dataframe
+#         df = pd.DataFrame(export_data)
+        
+#         today = datetime.now().strftime('%Y%m%d')
+        
+#         # Export as Excel file
+#         with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp:
+#             # Write to Excel
+#             df.to_excel(temp.name, index=False, engine='openpyxl')
+#             temp_name = temp.name
+        
+#         # Read the file
+#         with open(temp_name, 'rb') as f:
+#             data = f.read()
+        
+#         # Clean up
+#         os.unlink(temp_name)
+        
+#         # Prepare the filename
+#         filename = f"inventory_export_{today}"
+#         if category_filter:
+#             filename += f"_{category_filter.replace(' ', '_')}"
+#         filename += ".xlsx"
+        
+#         # Create response
+#         response = make_response(data)
+#         response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+#         response.headers["Content-type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        
+#         return response
+        
+#     except Exception as e:
+#         current_app.logger.error(f"Error exporting inventory: {str(e)}")
+#         return error_response(f"Error exporting inventory: {str(e)}", 500)
+    
 
 @inventory_bp.route("/export", methods=["GET"])
 @jwt_required()
@@ -609,73 +701,55 @@ def export_inventory():
         # Execute the query
         results = query.all()
         
-        # Prepare data for export
+        # Jika tidak ada data, langsung return error
+        if not results:
+            return error_response("No inventory data found", 404)
+
+        # Siapkan list untuk DataFrame
         export_data = []
         for product, stock in results:
-            min_stock, max_stock = get_stock_limits(product)
-
-            # Calculate total purchases if available
+            # Ambil informasi transaksi
             total_purchases = db.session.query(
                 func.sum(Transaction.qty)
             ).filter(
                 Transaction.product_id == product.product_id
             ).scalar() or 0
             
-            # Get supplier name
-            supplier_name = product.supplier_name or "N/A"
-            
-            # Calculate stock value
+            # Hitung nilai stok
             stock_value = float(stock.qty) * float(product.standard_price)
             
-            export_data.append({
-                'Product ID': product.product_id,
-                'Product Code': product.product_code,
-                'Product Name': product.product_name,
-                'Category': product.category or '',
-                'Standard Price': float(product.standard_price),
-                'Retail Price': float(product.retail_price),
-                'Current Stock': float(stock.qty),
-                'Unit': stock.unit or '',
-                'Min Stock': min_stock,  
-                'Max Stock': max_stock,  
-                'Stock Value': stock_value,
-                'Supplier': supplier_name,
-                'Location': stock.location or '',
-                'Total Sold': int(total_purchases),
-                'Use Forecast': 'Yes' if product.use_forecast else 'No'
-            })
+            # Masukkan langsung objek ke dictionary
+            data = product.to_dict()
+            data.update(stock.to_dict())  # Gabungkan dengan stock
+            data["Total Sold"] = int(total_purchases)
+            data["Stock Value"] = stock_value
+            
+            # Tambahkan ke list
+            export_data.append(data)
         
-        # Convert to dataframe
-        import pandas as pd
+        # Langsung buat DataFrame
         df = pd.DataFrame(export_data)
-        
-        # Format the date for the filename
-        from datetime import datetime
+
+        # Format nama file berdasarkan tanggal hari ini
         today = datetime.now().strftime('%Y%m%d')
-        
-        # Export as Excel file
-        import tempfile
-        import os
-        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp:
-            # Write to Excel
-            df.to_excel(temp.name, index=False, engine='openpyxl')
-            temp_name = temp.name
-        
-        # Read the file
-        with open(temp_name, 'rb') as f:
-            data = f.read()
-        
-        # Clean up
-        os.unlink(temp_name)
-        
-        # Prepare the filename
         filename = f"inventory_export_{today}"
         if category_filter:
             filename += f"_{category_filter.replace(' ', '_')}"
         filename += ".xlsx"
+
+        # Export langsung ke Excel tanpa set kolom manual
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp:
+            df.to_excel(temp.name, index=False, engine='openpyxl')
+            temp_name = temp.name
         
-        # Create response
-        from flask import make_response
+        # Baca kembali file Excel yang sudah dibuat
+        with open(temp_name, 'rb') as f:
+            data = f.read()
+        
+        # Bersihkan temporary file
+        os.unlink(temp_name)
+        
+        # Buat response
         response = make_response(data)
         response.headers["Content-Disposition"] = f"attachment; filename={filename}"
         response.headers["Content-type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -685,7 +759,7 @@ def export_inventory():
     except Exception as e:
         current_app.logger.error(f"Error exporting inventory: {str(e)}")
         return error_response(f"Error exporting inventory: {str(e)}", 500)
-    
+
 
 @inventory_bp.route("/search", methods=["GET"])
 @jwt_required()
@@ -929,5 +1003,4 @@ def get_product_analysis():
     except Exception as e:
         current_app.logger.error(f"Error retrieving product analysis: {str(e)}")
         return error_response(f"Error retrieving product analysis: {str(e)}", 500)
-
 

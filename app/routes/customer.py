@@ -293,85 +293,86 @@ def delete_customer(customer_id):
         db.session.rollback()
         return error_response(str(e), 500)
 
-@customer_bp.route("/export", methods=["GET"])
-@jwt_required()
-def export_customers():
-    """Endpoint to export all customers to Excel format"""
-    try:
-        # Get filter parameters
-        city_filter = request.args.get("city", "")
+
+# @customer_bp.route("/export", methods=["GET"])
+# @jwt_required()
+# def export_customers():
+#     """Endpoint to export all customers to Excel format"""
+#     try:
+#         # Get filter parameters
+#         city_filter = request.args.get("city", "")
         
-        # Base query
-        customer_query = Customer.query
+#         # Base query
+#         customer_query = Customer.query
         
-        # Apply city filter if provided
-        if city_filter:
-            customer_query = customer_query.filter(Customer.city == city_filter)
+#         # Apply city filter if provided
+#         if city_filter:
+#             customer_query = customer_query.filter(Customer.city == city_filter)
             
-        # Order by business_name
-        customers = customer_query.order_by(Customer.business_name).all()
+#         # Order by business_name
+#         customers = customer_query.order_by(Customer.business_name).all()
         
-        # Get purchase data
-        customer_ids = [c.customer_id for c in customers]
+#         # Get purchase data
+#         customer_ids = [c.customer_id for c in customers]
         
-        # If we have customers, get their purchase totals
-        purchase_data = {}
-        if customer_ids:
-            purchase_query = db.session.query(
-                Transaction.customer_id,
-                func.sum(Transaction.total_amount).label('total_purchases')
-            ).filter(
-                Transaction.customer_id.in_(customer_ids)
-            ).group_by(
-                Transaction.customer_id
-            ).all()
+#         # If we have customers, get their purchase totals
+#         purchase_data = {}
+#         if customer_ids:
+#             purchase_query = db.session.query(
+#                 Transaction.customer_id,
+#                 func.sum(Transaction.total_amount).label('total_purchases')
+#             ).filter(
+#                 Transaction.customer_id.in_(customer_ids)
+#             ).group_by(
+#                 Transaction.customer_id
+#             ).all()
             
-            purchase_data = {cid: float(total) for cid, total in purchase_query}
+#             purchase_data = {cid: float(total) for cid, total in purchase_query}
         
-        # Prepare data for export
-        export_data = []
-        for customer in customers:
-            export_data.append({
-                'Customer ID': customer.customer_id,
-                'Business Name': customer.business_name,
-                'Owner Name': customer.owner_name or '',
-                'City': customer.city or '',
-                'Phone': customer.extra or '',
-                'Address': customer.address_1 or '',
-                'NPWP': customer.npwp or '',
-                'NIK': customer.nik or '',
-                'Price Type': customer.price_type or 'Standard',
-                'Total Purchases': purchase_data.get(customer.customer_id, 0)
-            })
+#         # Prepare data for export
+#         export_data = []
+#         for customer in customers:
+#             export_data.append({
+#                 'Customer ID': customer.customer_id,
+#                 'Business Name': customer.business_name,
+#                 'Owner Name': customer.owner_name or '',
+#                 'City': customer.city or '',
+#                 'Phone': customer.extra or '',
+#                 'Address': customer.address_1 or '',
+#                 'NPWP': customer.npwp or '',
+#                 'NIK': customer.nik or '',
+#                 'Price Type': customer.price_type or 'Standard',
+#                 'Total Purchases': purchase_data.get(customer.customer_id, 0)
+#             })
         
-        # Convert to dataframe
-        df = pd.DataFrame(export_data)
+#         # Convert to dataframe
+#         df = pd.DataFrame(export_data)
         
-        # Format the date for the filename
-        today = datetime.now().strftime('%Y%m%d')
+#         # Format the date for the filename
+#         today = datetime.now().strftime('%Y%m%d')
         
-        # Export as Excel file
-        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp:
-            # Write to Excel
-            df.to_excel(temp.name, index=False, engine='openpyxl')
-            temp_name = temp.name
+#         # Export as Excel file
+#         with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp:
+#             # Write to Excel
+#             df.to_excel(temp.name, index=False, engine='openpyxl')
+#             temp_name = temp.name
         
-        # Read the file
-        with open(temp_name, 'rb') as f:
-            data = f.read()
+#         # Read the file
+#         with open(temp_name, 'rb') as f:
+#             data = f.read()
         
-        # Clean up
-        os.unlink(temp_name)
+#         # Clean up
+#         os.unlink(temp_name)
         
-        # Create response
-        response = make_response(data)
-        response.headers["Content-Disposition"] = f"attachment; filename=customers_export_{today}.xlsx"
-        response.headers["Content-type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+#         # Create response
+#         response = make_response(data)
+#         response.headers["Content-Disposition"] = f"attachment; filename=customers_export_{today}.xlsx"
+#         response.headers["Content-type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         
-        return response
+#         return response
         
-    except Exception as e:
-        return error_response(f"Error exporting customers: {str(e)}", 500)
+#     except Exception as e:
+#         return error_response(f"Error exporting customers: {str(e)}", 500)
     
 
 @customer_bp.route("/<customer_id>/sales", methods=["GET"]) 
@@ -538,3 +539,57 @@ def get_customer_sales(customer_id):
     except Exception as e:
         return error_response(str(e), 500)
   
+
+@customer_bp.route("/export", methods=["GET"])
+@jwt_required()
+def export_customers():
+    """Endpoint to export all customers to Excel format"""
+    try:
+        # Get filter parameters
+        city_filter = request.args.get("city", "")
+        
+        # Base query
+        customer_query = Customer.query
+        
+        # Apply city filter if provided
+        if city_filter:
+            customer_query = customer_query.filter(Customer.city == city_filter)
+            
+        # Order by business_name
+        customers = customer_query.order_by(Customer.business_name).all()
+        
+        # Ambil semua data customer langsung dalam bentuk dict
+        customer_data = [c.to_dict() for c in customers]
+        
+        # Jika tidak ada data, return response kosong
+        if not customer_data:
+            return error_response("No customer data found", 404)
+
+        # Konversi hasil query langsung ke DataFrame
+        df = pd.DataFrame(customer_data)
+
+        # Format nama file berdasarkan tanggal hari ini
+        today = datetime.now().strftime('%Y%m%d')
+        
+        # Export langsung ke Excel tanpa set kolom manual
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp:
+            df.to_excel(temp.name, index=False, engine='openpyxl')
+            temp_name = temp.name
+        
+        # Baca kembali file Excel yang sudah dibuat
+        with open(temp_name, 'rb') as f:
+            data = f.read()
+        
+        # Bersihkan temporary file
+        os.unlink(temp_name)
+        
+        # Buat response
+        response = make_response(data)
+        response.headers["Content-Disposition"] = f"attachment; filename=customers_export_{today}.xlsx"
+        response.headers["Content-type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        
+        return response
+        
+    except Exception as e:
+        return error_response(f"Error exporting customers: {str(e)}", 500)
+

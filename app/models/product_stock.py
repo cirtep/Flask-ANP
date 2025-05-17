@@ -31,7 +31,7 @@ class ProductStock(db.Model):
             "product_id": self.product_id,
             "report_date": self.report_date.isoformat() if self.report_date else None,
             "location": self.location,
-            "quantity": self.quantity,
+            "qty": self.qty,
             "unit": self.unit,
             "price": self.price,
             "created_at": self.created_at.isoformat() if self.created_at else None,

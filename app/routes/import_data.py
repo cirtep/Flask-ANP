@@ -91,6 +91,13 @@ def import_customers():
         # Konversi NaN menjadi None untuk seluruh DataFrame
         df = df.where(pd.notna(df), None)
 
+        # Ubah NaN, string "nan", dan string kosong menjadi None
+        for col in df.columns:
+                    # Check if column contains float values (common for NaN)
+                    if df[col].dtype == 'float64':
+                        # Replace NaN with None in this column
+                        df[col] = df[col].apply(lambda x: None if pd.isna(x) else x)
+
         # Iterasi dan validasi data sebelum dimasukkan ke database
         for index, row in df.iterrows():
             if pd.isna(row["customer_code"]) or pd.isna(row["business_name"]):
@@ -110,13 +117,28 @@ def import_customers():
                 # )
                 continue  # Skip to next row
 
-            # Buat instance Customer dengan dictionary comprehension
-            new_customer = Customer(
-                **{col: row[col] for col in EXPECTED_COLUMNS.values()}
-            )
+            customer_data = {}
+            for col in EXPECTED_COLUMNS.values():
+                value = row[col]
+                # Double-check that we don't pass NaN to MySQL
+                if isinstance(value, float) and pd.isna(value):
+                    customer_data[col] = None
+                else:
+                    customer_data[col] = value
+
+            # Buat instance Customer dengan data yang sudah dibersihkan
+            new_customer = Customer(**customer_data)
 
             # Tambahkan ke sesi database
             db.session.add(new_customer)
+
+            # # Buat instance Customer dengan dictionary comprehension
+            # new_customer = Customer(
+            #     **{col: row[col] for col in EXPECTED_COLUMNS.values()}
+            # )
+
+            # # Tambahkan ke sesi database
+            # db.session.add(new_customer)
 
         # Commit transaksi database setelah semua data valid
         db.session.commit()

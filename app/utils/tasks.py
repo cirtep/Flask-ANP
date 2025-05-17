@@ -76,7 +76,7 @@ def run_parameter_tuning_task(job_id):
             df = df.sort_values("ds")
             
             # Ensure positive values
-            # df["y"] = df["y"].clip(lower=0)
+            df["y"] = df["y"].clip(lower=0)
             
             # Prepare monthly data with proper frequency
             freq = "MS"  # Monthly start frequency
@@ -135,13 +135,13 @@ def run_parameter_tuning_task(job_id):
             data_months = len(df_monthly)
             training_months = max(int(data_months * 0.6), 12)
             initial_period = f"{training_months * 30} days"
-            initial_period = "360 days"  # Set to 12 months for initial period
+            # initial_period = "360 days"  # Set to 12 months for initial period
 
             # Define evaluation function for parallel processing
             def evaluate_params(params):
                 try:
                     # Create model with current parameters
-                    model = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False,**params)
+                    model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False,**params)
                     # model = Prophet(**params)
 
                     # Add Indonesia country holidays if holidays_prior_scale is in parameters
@@ -159,7 +159,8 @@ def run_parameter_tuning_task(job_id):
                     # Perform cross-validation with appropriate settings
                     df_cv = cross_validation(
                         model,
-                        initial=initial_period,
+                        # initial=initial_period,
+                        initial= "730 days",
                         period="30 days",  # Test 1 month at a time
                         horizon="30 days", # Forecast 1 month ahead
                         parallel="processes"
@@ -204,7 +205,7 @@ def run_parameter_tuning_task(job_id):
             logger.info(f"Testing {total_params} parameter combinations in parallel")
             
             # Determine the number of jobs based on CPU cores, but limit it
-            n_jobs = min(total_params, 4)  # Use at most 4 cores to avoid overloading
+            n_jobs = min(total_params, -1)  # Use at most 4 cores to avoid overloading
             
             results = Parallel(n_jobs=n_jobs)(
                 delayed(evaluate_params)(params) for params in all_params
