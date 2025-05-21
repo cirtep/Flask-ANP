@@ -474,26 +474,26 @@ def sales_forecast():
             current_app.logger.info(f"Using custom parameters for category '{category}': {prophet_params}")
         else:
             # Use default parameters
+            model = Prophet(
+                yearly_seasonality=True,
+                weekly_seasonality=True,
+                daily_seasonality=False,
+                seasonality_mode='multiplicative',
+                changepoint_prior_scale=0.05,
+                seasonality_prior_scale=1,
+                holidays_prior_scale= 10,
+                changepoint_range= 0.8,
+            )
             # model = Prophet(
             #     yearly_seasonality=True,
             #     weekly_seasonality=False,
             #     daily_seasonality=False,
             #     seasonality_mode='additive',
-            #     changepoint_prior_scale=0.2505,
-            #     seasonality_prior_scale=2.5075,
-            #     holidays_prior_scale= 5.005,
-            #     changepoint_range= 0.835,
+            #     changepoint_prior_scale=0.7,
+            #     seasonality_prior_scale=5,
+            #     holidays_prior_scale= 10,
+            #     changepoint_range= 0.9,
             # )
-            model = Prophet(
-                yearly_seasonality=True,
-                weekly_seasonality=False,
-                daily_seasonality=False,
-                seasonality_mode='additive',
-                changepoint_prior_scale=0.7,
-                seasonality_prior_scale=5,
-                holidays_prior_scale= 10,
-                changepoint_range= 0.9,
-            )
             current_app.logger.info(f"Using default parameters for product '{product_id}'")
             
         # Add Indonesia country holidays

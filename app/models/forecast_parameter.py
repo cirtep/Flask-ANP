@@ -2,6 +2,7 @@
 from app import db
 from datetime import datetime, timezone
 import json
+import pytz
 
 class ForecastParameter(db.Model):
     __tablename__ = "forecast_parameter"
@@ -26,6 +27,25 @@ class ForecastParameter(db.Model):
         """Set parameters from dictionary to JSON string"""
         self.parameters = json.dumps(params_dict)
     
+    def format_date_makassar(self, date_obj):
+        """Format date in Makassar timezone (UTC+8)"""
+        if not date_obj:
+            return None
+        
+        # Define Makassar timezone
+        makassar_tz = pytz.timezone('Asia/Makassar')
+        
+        # Convert UTC date to Makassar timezone
+        if date_obj.tzinfo is not None:
+            makassar_date = date_obj.astimezone(makassar_tz)
+        else:
+            # If no timezone info, assume it's UTC
+            utc_date = pytz.utc.localize(date_obj)
+            makassar_date = utc_date.astimezone(makassar_tz)
+        
+        # Format the date as a string
+        return makassar_date.strftime('%Y-%m-%d %H:%M:%S')
+    
     def to_dict(self):
         """Convert object to dictionary"""
         return {
@@ -34,8 +54,8 @@ class ForecastParameter(db.Model):
             "parameters": self.get_parameters(),
             "mape": self.mape,
             "rmse": self.rmse,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "created_at": self.format_date_makassar(self.created_at),
+            "updated_at": self.format_date_makassar(self.updated_at),
         }
 
 
@@ -74,6 +94,25 @@ class TuningJob(db.Model):
         """Set result from dictionary to JSON string"""
         self.result = json.dumps(result_dict)
     
+    def format_date_makassar(self, date_obj):
+        """Format date in Makassar timezone (UTC+8)"""
+        if not date_obj:
+            return None
+        
+        # Define Makassar timezone
+        makassar_tz = pytz.timezone('Asia/Makassar')
+        
+        # Convert UTC date to Makassar timezone
+        if date_obj.tzinfo is not None:
+            makassar_date = date_obj.astimezone(makassar_tz)
+        else:
+            # If no timezone info, assume it's UTC
+            utc_date = pytz.utc.localize(date_obj)
+            makassar_date = utc_date.astimezone(makassar_tz)
+        
+        # Format the date as a string
+        return makassar_date.strftime('%Y-%m-%d %H:%M:%S')
+    
     def to_dict(self):
         """Convert object to dictionary"""
         result = {
@@ -82,8 +121,8 @@ class TuningJob(db.Model):
             "status": self.status,
             "progress": self.progress,
             "parameters": self.get_parameters(),
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "created_at": self.format_date_makassar(self.created_at),
+            "updated_at": self.format_date_makassar(self.updated_at),
         }
         
         if self.status == "completed":
