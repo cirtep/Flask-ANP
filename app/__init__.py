@@ -33,10 +33,6 @@ def create_app(config_class=Config):
     app.register_blueprint(inventory_bp, url_prefix="/api/inventory")
     app.register_blueprint(forecast_bp, url_prefix="/api/forecast")
     app.register_blueprint(goals_bp, url_prefix="/api/forecast") 
-    app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
-
-    # Create database tables if they don't exist
-    with app.app_context():
-        db.create_all()
+    app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")    
 
     return app
