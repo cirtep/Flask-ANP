@@ -201,6 +201,13 @@ def import_products():
                     f"Row {index + 1}: Product id and name cannot be null", 400
                 )
 
+            if Product.query.filter_by(product_code=row["product_code"]).first():
+                # return error_response(
+                #     f"Row {index + 1}: Duplicate product_code '{row['product_code']}'",
+                #     400,
+                # )
+                continue  # Skip to next row
+
             # Cek apakah produk sudah ada berdasarkan product_id
             if Product.query.filter_by(product_id=row["product_id"]).first():
                 # return error_response(
@@ -245,11 +252,12 @@ def import_product_stock():
         # Cek apakah semua kolom yang diperlukan ada
         EXPECTED_COLUMNS = {
             "judul": "report_date",
+            "tglbeli": "purchase_date",
             "cstdcode": "product_id",
             "cwhsdesc": "location",
-            "qty2": "qty",
+            "ntqty": "qty",
             "cunidesc": "unit",
-            "harga2": "price",
+            "nstdprice": "price",
         }
 
         missing_columns = [

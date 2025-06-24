@@ -1,0 +1,53 @@
+# docker-compose.yml
+
+version: "3.8"
+
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: production-anp-api
+    env_file:
+      - ./backend/.env
+    ports:
+      - "5005:5000"
+    restart: always
+    depends_on:
+      - db
+    networks:
+      - app-network
+
+  client:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: my-vite-react-frontend
+    ports:
+      - "3000:80"
+    restart: always
+    networks:
+      - app-network
+
+  db:
+    image: mysql:8.0
+    container_name: mysql-db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: aneka_niaga_db  
+      MYSQL_USER: myuser
+      MYSQL_PASSWORD: mypassword
+    volumes:
+      - db_data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  db_data:

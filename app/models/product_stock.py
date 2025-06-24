@@ -10,6 +10,7 @@ class ProductStock(db.Model):
         db.String(50), db.ForeignKey("product.product_id"), nullable=False
     )  # cstdcode (id barang)
     report_date = db.Column(db.Date, nullable=False)  # judul (Per Tgl. XX-XX-XXXX)
+    purchase_date = db.Column(db.Date, nullable=True)  # tglbeli (tgl beli)
     location = db.Column(db.String(100), nullable=True)  # cwhsdesc (lokasi)
     qty = db.Column(db.Integer, nullable=False)  # qty2 (qty)
     unit = db.Column(db.String(50), nullable=True)  # cunidesc (satuan)
@@ -30,6 +31,7 @@ class ProductStock(db.Model):
             "id": self.id,
             "product_id": self.product_id,
             "report_date": self.report_date.isoformat() if self.report_date else None,
+            "purchase_date": self.purchase_date.isoformat() if self.purchase_date else None,
             "location": self.location,
             "qty": self.qty,
             "unit": self.unit,
