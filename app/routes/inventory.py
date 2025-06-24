@@ -3,7 +3,7 @@ import tempfile
 from flask import Blueprint, make_response, request, jsonify, current_app
 from flask_jwt_extended import jwt_required
 import pandas as pd
-from app import db
+from ..db import db
 from app.utils.security import success_response, error_response
 from app.utils.use_forecast import get_stock_limits
 from sqlalchemy import or_, func

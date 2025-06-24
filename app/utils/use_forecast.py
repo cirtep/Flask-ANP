@@ -2,7 +2,7 @@
 from app.models.saved_forecast import SavedForecast
 from app.models.product import Product
 from app.models.product_stock import ProductStock
-from app import db
+from ..db import db
 from sqlalchemy import desc, extract
 from datetime import datetime
 

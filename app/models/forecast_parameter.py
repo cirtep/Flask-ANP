@@ -1,5 +1,5 @@
 # app/models/forecast_parameters.py
-from app import db
+from ..db import db
 from datetime import datetime, timezone
 import json
 import pytz

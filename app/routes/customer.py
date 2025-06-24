@@ -3,7 +3,7 @@ from flask_jwt_extended import jwt_required
 import pandas as pd
 from app.models.customer import Customer
 from app.models.transaction import Transaction
-from app import db
+from ..db import db
 from app.utils.security import success_response, error_response
 from sqlalchemy import or_, func, desc
 from datetime import datetime, timedelta

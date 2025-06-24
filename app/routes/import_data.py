@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
 import pandas as pd
-from app import db
+from ..db import db
 from app.utils.security import success_response, error_response
 from app.models.customer import Customer
 from app.models.product import Product

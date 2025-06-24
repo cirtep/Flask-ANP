@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 from prophet import Prophet
 from sqlalchemy import and_, extract, func
-from app import db
+from ..db import db
 from app.models.transaction import Transaction
 from app.models.product import Product
 from app.models.forecast_parameter import ForecastParameter, TuningJob

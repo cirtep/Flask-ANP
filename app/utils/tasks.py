@@ -6,7 +6,7 @@ from prophet import Prophet
 from prophet.diagnostics import cross_validation, performance_metrics
 from datetime import datetime, timezone
 from joblib import Parallel, delayed
-from app import db
+from ..db import db
 from app.models.transaction import Transaction
 from app.models.forecast_parameter import ForecastParameter, TuningJob
 from sqlalchemy import func

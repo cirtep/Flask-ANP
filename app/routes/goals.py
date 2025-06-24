@@ -1,6 +1,6 @@
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
-from app import db
+from ..db import db
 from app.utils.security import success_response, error_response
 from app.models.transaction import Transaction
 from app.models.product import Product
