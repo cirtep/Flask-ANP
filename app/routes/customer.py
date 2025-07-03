@@ -387,12 +387,23 @@ def get_customer_sales(customer_id):
         if not customer:
             return error_response("Customer not found", 404)
         
-        # Get time range filter from query params (default: all time)
-        months = int(request.args.get("months", 9999))
+        # Get date range from query params
+        start_date_str = request.args.get("start_date")
+        end_date_str = request.args.get("end_date")
         
-        # Calculate date ranges for different metrics
+        # Parse dates or use defaults
         today = datetime.now()
-        start_date = today - timedelta(days=30 * months)
+        if start_date_str:
+            start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+        else:
+            # Default to 10 years ago if no start date
+            start_date = today - timedelta(days=365 * 10)
+            
+        if end_date_str:
+            end_date = datetime.strptime(end_date_str, "%Y-%m-%d")
+        else:
+            # Default to today if no end date
+            end_date = today
         
         # This year/previous year ranges for YTD comparison
         current_year = today.year
@@ -410,7 +421,8 @@ def get_customer_sales(customer_id):
             func.sum(Transaction.total_amount).label("total_amount")
         ).filter(
             Transaction.customer_id == customer_id,
-            Transaction.invoice_date >= start_date
+            Transaction.invoice_date >= start_date,
+            Transaction.invoice_date <= end_date
         ).group_by(Transaction.invoice_id).order_by(func.min(Transaction.invoice_date).desc()).all()
 
         # Format invoice list
@@ -423,7 +435,7 @@ def get_customer_sales(customer_id):
             for inv in invoices
         ]
 
-        # Calculate sales summary
+        # Calculate sales summary (within date range)
         total_sales = sum(t["total_amount"] for t in transaction_list)
         total_orders = len(transaction_list)
         
@@ -457,14 +469,15 @@ def get_customer_sales(customer_id):
         if previous_ytd_sales > 0:
             ytd_growth = ((this_ytd_sales - previous_ytd_sales) / previous_ytd_sales) * 100
         
-        # Group by month for time series
+        # Group by month for time series (within date range)
         monthly_sales = db.session.query(
             func.date_format(Transaction.invoice_date, '%Y-%m-01').label('month'),
             func.sum(Transaction.total_amount).label('amount'),
             func.count(func.distinct(Transaction.invoice_id)).label('order_count')
         ).filter(
             Transaction.customer_id == customer_id,
-            Transaction.invoice_date >= start_date
+            Transaction.invoice_date >= start_date,
+            Transaction.invoice_date <= end_date
         ).group_by('month').order_by('month').all()
         
         # Format monthly sales for frontend charts
@@ -477,7 +490,7 @@ def get_customer_sales(customer_id):
             for entry in monthly_sales
         ]
 
-        # Get ALL products purchased by this customer based on time range
+        # Get ALL products purchased by this customer based on date range
         all_products_query = db.session.query(
             Transaction.product_id,
             Transaction.product_name,
@@ -488,11 +501,12 @@ def get_customer_sales(customer_id):
             func.count(Transaction.invoice_id.distinct()).label('purchase_count')
         ).filter(
             Transaction.customer_id == customer_id,
-            Transaction.invoice_date >= start_date
+            Transaction.invoice_date >= start_date,
+            Transaction.invoice_date <= end_date
         ).group_by(
             Transaction.product_id,
             Transaction.product_name
-        ).all()
+        ).order_by(desc('amount')).all()    
         
         # Format all products data
         all_products = [
